@@ -102,27 +102,6 @@ function runId(): string {
 	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function workspaceFooterLine(ctx: any, footerData: any): string {
-	const home = process.env.HOME || process.env.USERPROFILE || "";
-	let cwd = ctx.cwd as string;
-	if (home && cwd.startsWith(home)) cwd = `~${cwd.slice(home.length)}`;
-	const branch = footerData?.getGitBranch?.();
-	return branch ? `${cwd} (${branch})` : cwd;
-}
-
-function setFlowReadyFooter(ctx: any): void {
-	if (!ctx.hasUI) return;
-	ctx.ui.setFooter((_tui: any, _theme: any, footerData: any) => ({
-		render(width: number) {
-			return [
-				truncateToWidth(color(workspaceFooterLine(ctx, footerData), ANSI.dim), width),
-				truncateToWidth(`${color("Flow ready", ANSI.softGreen)} ${color("•", ANSI.gray)} /flows ${color("•", ANSI.gray)} /flow .pi/workflows/<name>.yaml <task> ${color("•", ANSI.gray)} /flow-runs`, width),
-			];
-		},
-		invalidate() {},
-	}));
-}
-
 function setFlowIdlePanel(ctx: any): void {
 	if (!ctx.hasUI) return;
 	const flows = discoverFlowFiles(ctx.cwd).filter((flow) => flow.source === "project").slice(0, 5);
@@ -145,7 +124,6 @@ function setFlowIdlePanel(ctx: any): void {
 }
 
 function setFlowReadyUi(ctx: any): void {
-	setFlowReadyFooter(ctx);
 	setFlowIdlePanel(ctx);
 }
 
@@ -410,7 +388,6 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		complete(status: "passed" | "failed", active: string) {
 			render(`${status === "passed" ? "complete" : "failed"}: ${active}`);
 			ctx.ui.setStatus("flow", status === "passed" ? "Flow complete" : "Flow failed");
-			setFlowReadyFooter(ctx);
 		},
 	};
 }
