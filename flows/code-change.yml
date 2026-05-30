@@ -1,0 +1,36 @@
+steps:
+  - name: plan
+    label: Plan the change
+    type: agent
+    tools: read,bash,write
+    prompt: prompts/PLAN.md
+
+  - name: check_plan
+    label: Validate plan artifact
+    type: command
+    timeoutSeconds: 30
+    run: test -s "{{ .RunDir }}/PLAN.md" || { echo "Missing plan artifact: {{ .RunDir }}/PLAN.md" >&2; exit 1; }
+
+  - name: build
+    label: Implement change
+    type: agent
+    tools: read,bash,edit,write
+    prompt: prompts/BUILD.md
+
+  - name: review
+    label: Review implementation
+    type: agent
+    tools: read,bash
+    prompt: prompts/REVIEW.md
+
+  - name: refine
+    label: Refine implementation
+    type: agent
+    tools: read,bash,edit,write
+    prompt: prompts/REFINE.md
+
+  - name: summarize
+    label: Write final summary
+    type: agent
+    tools: read,bash,write
+    prompt: prompts/SUMMARY.md
