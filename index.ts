@@ -460,6 +460,8 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 
 function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; source: "project" | "bundled" }> {
 	const candidates = [
+		{ dir: path.join(cwd, ".pi", "workflows"), source: "project" as const },
+		// Legacy project locations retained so existing workflows keep working.
 		{ dir: path.join(cwd, ".pi", "flow"), source: "project" as const },
 		{ dir: path.join(cwd, ".pi", "flow", "flows"), source: "project" as const },
 		{ dir: path.join(EXTENSION_DIR, "flows"), source: "bundled" as const },
@@ -500,7 +502,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 			const runs = listRunDirs(ctx.cwd, 5);
 			pi.sendMessage({
 				customType: "flows",
-				content: `# Flows\n\n${flows.length ? flows.map((flow) => `- **${flow.label}** (${flow.source}) — \`${flow.file}\`\n  - run: \`/flow ${flow.file} "your task"\``).join("\n") : "No flows found. Add YAML files under `.pi/flow/flows/`."}\n\n## Recent runs\n\n${runs.length ? runs.map((run) => `- \`${run}\` — summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs yet."}`,
+				content: `# Flows\n\n${flows.length ? flows.map((flow) => `- **${flow.label}** (${flow.source}) — \`${flow.file}\`\n  - run: \`/flow ${flow.file} "your task"\``).join("\n") : "No flows found. Add YAML files under `.pi/workflows/`."}\n\n## Recent runs\n\n${runs.length ? runs.map((run) => `- \`${run}\` — summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs yet."}`,
 				display: true,
 			}, { triggerTurn: false });
 		},
@@ -543,7 +545,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			pi.sendMessage({
 				customType: "flow-status",
-				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands or nested Pi agents.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run artifacts.\n\n## Project flows\n\nPut YAML files in `.pi/flow/flows/`. Run artifacts are written to `.pi/flow/runs/<run-id>/`.",
+				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands or nested Pi agents.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run artifacts.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run artifacts are written to `.pi/flow/runs/<run-id>/`.",
 				display: true,
 			}, { triggerTurn: false });
 		},

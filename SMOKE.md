@@ -17,8 +17,8 @@ tmp=$(mktemp -d)
 cd "$tmp"
 git init -q
 
-mkdir -p flows
-cat > flows/smoke.yml <<'YAML'
+mkdir -p .pi/workflows
+cat > .pi/workflows/smoke.yaml <<'YAML'
 steps:
   - name: make_plan
     label: Make smoke plan
@@ -31,7 +31,7 @@ steps:
     run: test -s "{{ .RunDir }}/PLAN.md"
 YAML
 
-pi --no-session -e /path/to/index.ts --mode json -p '/flow flows/smoke.yml smoke test'
+pi --no-session -e /path/to/index.ts --mode json -p '/flow .pi/workflows/smoke.yaml smoke test'
 ```
 
 Expected:
@@ -44,7 +44,7 @@ Expected:
 ## Failure path
 
 ```bash
-cat > flows/fail.yml <<'YAML'
+cat > .pi/workflows/fail.yaml <<'YAML'
 steps:
   - name: check_plan
     label: Check missing plan
@@ -52,7 +52,7 @@ steps:
     run: test -s "{{ .RunDir }}/PLAN.md" || { echo "Missing plan artifact" >&2; exit 1; }
 YAML
 
-pi --no-session -e /path/to/index.ts --mode json -p '/flow flows/fail.yml smoke failure'
+pi --no-session -e /path/to/index.ts --mode json -p '/flow .pi/workflows/fail.yaml smoke failure'
 ```
 
 Expected:

@@ -9,6 +9,8 @@ A workflow is a YAML file with ordered steps. Each step is either:
 
 Flow shows the run live in Pi's UI and writes durable artifacts for every run.
 
+Project workflows live in `.pi/workflows/<flow-name>.yaml`.
+
 ## Commands
 
 ```text
@@ -30,6 +32,21 @@ As a package:
 
 ```bash
 pi install git:github.com/owainlewis/pi-dynamic-workflows
+```
+
+## Project workflows
+
+Put project workflows in `.pi/workflows/`:
+
+```text
+.pi/workflows/code-change.yaml
+.pi/workflows/hello.yaml
+```
+
+Then run one with:
+
+```text
+/flow .pi/workflows/hello.yaml "Run the hello workflow"
 ```
 
 ## Workflow format
