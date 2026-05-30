@@ -116,11 +116,37 @@ function setFlowReadyFooter(ctx: any): void {
 		render(width: number) {
 			return [
 				truncateToWidth(color(workspaceFooterLine(ctx, footerData), ANSI.dim), width),
-				truncateToWidth(`${color("Flow ready", ANSI.softGreen)} ${color("•", ANSI.gray)} /flows ${color("•", ANSI.gray)} /flow <flow.yml> <task> ${color("•", ANSI.gray)} /flow-runs`, width),
+				truncateToWidth(`${color("Flow ready", ANSI.softGreen)} ${color("•", ANSI.gray)} /flows ${color("•", ANSI.gray)} /flow .pi/workflows/<name>.yaml <task> ${color("•", ANSI.gray)} /flow-runs`, width),
 			];
 		},
 		invalidate() {},
 	}));
+}
+
+function setFlowIdlePanel(ctx: any): void {
+	if (!ctx.hasUI) return;
+	const flows = discoverFlowFiles(ctx.cwd).filter((flow) => flow.source === "project").slice(0, 5);
+	const runs = listRunDirs(ctx.cwd, 3);
+	const lines = [
+		color("Flow", ANSI.softGreen + ANSI.bold),
+		`${color("Status:", ANSI.cyan)} No active workflow`,
+		`${color("Workflows:", ANSI.cyan)} ${flows.length ? flows.map((flow) => flow.file).join(", ") : "add .pi/workflows/<name>.yaml"}`,
+		`${color("Run:", ANSI.cyan)} /flow .pi/workflows/<name>.yaml "your task"`,
+		...(runs.length ? ["", color("Recent runs", ANSI.cyan), ...runs.map((run) => `${color("•", ANSI.gray)} ${run}`)] : []),
+	];
+	ctx.ui.setWidget("flow-progress", (_tui: any, _theme: any) => ({
+		render(width: number) {
+			const rendered: string[] = [];
+			for (const line of lines) for (const wrapped of wrapTextWithAnsi(line, Math.max(20, width - 2))) rendered.push(truncateToWidth(` ${wrapped}`, width));
+			return rendered;
+		},
+		invalidate() {},
+	}), { placement: "aboveEditor" });
+}
+
+function setFlowReadyUi(ctx: any): void {
+	setFlowReadyFooter(ctx);
+	setFlowIdlePanel(ctx);
 }
 
 function stripYamlComment(line: string): string {
@@ -381,9 +407,9 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 			statuses[index].detail = truncate(detail, 140);
 			render(`${statuses[index].label}: ${detail}`);
 		},
-		clear() {
-			ctx.ui.setStatus("flow", undefined);
-			ctx.ui.setWidget("flow-progress", undefined);
+		complete(status: "passed" | "failed", active: string) {
+			render(`${status === "passed" ? "complete" : "failed"}: ${active}`);
+			ctx.ui.setStatus("flow", status === "passed" ? "Flow complete" : "Flow failed");
 			setFlowReadyFooter(ctx);
 		},
 	};
@@ -440,6 +466,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 		const endedAt = new Date().toISOString();
 		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }));
 		await writeArtifact(absoluteRunDir, "RUN.json", JSON.stringify({ flowPath: relativeFlowPath, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }, null, 2));
+		ui.complete("passed", `${relativeRunDir}/SUMMARY.md`);
 		return relativeRunDir;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -452,9 +479,8 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 		const endedAt = new Date().toISOString();
 		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", steps }));
 		await writeArtifact(absoluteRunDir, "RUN.json", JSON.stringify({ flowPath: relativeFlowPath, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", error: message, steps }, null, 2));
+		ui.complete("failed", `${relativeRunDir}/SUMMARY.md`);
 		throw error;
-	} finally {
-		ui.clear();
 	}
 }
 
@@ -493,7 +519,7 @@ function listRunDirs(cwd: string, limit = 10): string[] {
 }
 
 export default function flowExtension(pi: ExtensionAPI): void {
-	pi.on("session_start", async (_event, ctx) => setFlowReadyFooter(ctx));
+	pi.on("session_start", async (_event, ctx) => setFlowReadyUi(ctx));
 
 	pi.registerCommand("flows", {
 		description: "List available Flow workflows",
