@@ -40,7 +40,7 @@ interface StepSummary {
 	status: StepStatus;
 	detail: string;
 	durationMs?: number;
-	artifact?: string;
+	log?: string;
 }
 
 interface ProcessResult {
@@ -92,10 +92,6 @@ function parsePositiveInt(value: unknown, fallback: number): number {
 function relativeForPrompt(cwd: string, filePath: string): string {
 	const relative = path.relative(cwd, filePath);
 	return relative.startsWith("..") ? filePath : relative;
-}
-
-function safeArtifactName(name: string): string {
-	return name.replace(/[^A-Za-z0-9_-]/g, "-");
 }
 
 function runId(): string {
@@ -322,9 +318,16 @@ async function writeArtifact(runDir: string, name: string, content: string): Pro
 	return artifactPath;
 }
 
-function commandArtifact(step: FlowStep, result: ProcessResult): string {
-	const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
-	return [`# Command Step: ${step.label ?? step.name}`, "", `- command: \`${step.run}\``, `- status: ${result.exitCode === 0 ? "passed" : "failed"}`, `- exitCode: ${result.exitCode}`, `- durationMs: ${result.durationMs}`, `- timedOut: ${result.timedOut}`, output ? `\n\`\`\`text\n${output.slice(0, 8_000)}\n\`\`\`` : ""].join("\n");
+function summarizeCommandResult(command: string, result: ProcessResult): string {
+	const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n").trim();
+	const lines = [`command: ${command}`, `exitCode: ${result.exitCode}`, `timedOut: ${result.timedOut}`];
+	if (output) lines.push("", output.slice(0, 2_000));
+	return lines.join("\n");
+}
+
+function summarizeAgentOutput(output: string): string {
+	const trimmed = output.trim();
+	return trimmed ? trimmed.slice(0, 2_000) : "Agent completed without a final text response.";
 }
 
 function summaryMarkdown(data: { flowPath: string; task: string; runId: string; runDir: string; startedAt: string; endedAt: string; status: "passed" | "failed"; steps: StepSummary[] }): string {
@@ -333,7 +336,7 @@ function summaryMarkdown(data: { flowPath: string; task: string; runId: string; 
 	for (const step of data.steps) {
 		const icon = step.status === "passed" ? "✅" : step.status === "failed" ? "❌" : step.status === "skipped" ? "⏭️" : "◻️";
 		lines.push("", `### ${icon} ${step.label}`, "", `- name: ${step.name}`, `- type: ${step.type}`, `- status: ${step.status}`, `- duration: ${step.durationMs === undefined ? "n/a" : `${Math.round(step.durationMs / 1000)}s`}`, `- detail: ${step.detail || "n/a"}`);
-		if (step.artifact) lines.push(`- artifact: \`${step.artifact}\``);
+		if (step.log) lines.push("", "```text", step.log, "```");
 	}
 	return `${lines.join("\n").trim()}\n`;
 }
@@ -403,7 +406,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 	const steps: StepSummary[] = flow.steps.map((step) => ({ name: step.name, label: step.label ?? step.name, type: step.type, status: "pending", detail: "" }));
 	const ui = createFlowUi(options.ctx, relativeFlowPath, relativeRunDir, flow.steps);
 
-	await writeArtifact(absoluteRunDir, "RUN.json", JSON.stringify({ flowPath: relativeFlowPath, runId: id, runDir: relativeRunDir, startedAt, status: "running", steps }, null, 2));
+	await mkdir(absoluteRunDir, { recursive: true });
 
 	let currentIndex = -1;
 	try {
@@ -420,8 +423,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 				const command = renderTemplate(step.run!, vars);
 				ui.detail(i, command);
 				const result = await runShell(command, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
-				const artifact = await writeArtifact(absoluteRunDir, `${safeArtifactName(step.name)}.command.md`, commandArtifact({ ...step, run: command }, result));
-				steps[i].artifact = relativeForPrompt(options.cwd, artifact);
+				steps[i].log = summarizeCommandResult(command, result);
 				steps[i].durationMs = Date.now() - stepStartedAt;
 				steps[i].detail = result.exitCode === 0 ? `passed in ${result.durationMs}ms` : `failed with exit code ${result.exitCode}${result.timedOut ? " (timed out)" : ""}`;
 				if (result.exitCode !== 0) throw new Error(`Command step failed: ${step.label ?? step.name}\n${result.stderr || result.stdout}`.trim());
@@ -430,8 +432,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 				const prompt = renderTemplate(await readFile(promptPath, "utf8"), vars);
 				const tools = step.tools?.split(",").map((tool) => tool.trim()).filter(Boolean);
 				const output = await runAgent({ cwd: options.cwd, prompt, tools, timeoutSeconds: step.timeoutSeconds ?? parsePositiveInt(process.env.FLOW_AGENT_TIMEOUT_SECONDS, DEFAULT_AGENT_TIMEOUT_SECONDS), signal: options.signal, onProgress: (message) => ui.detail(i, message) });
-				const artifact = await writeArtifact(absoluteRunDir, `${safeArtifactName(step.name)}.agent.md`, output || `# ${step.label ?? step.name}\n\nCompleted.`);
-				steps[i].artifact = relativeForPrompt(options.cwd, artifact);
+				steps[i].log = summarizeAgentOutput(output);
 				steps[i].durationMs = Date.now() - stepStartedAt;
 				steps[i].detail = "agent completed";
 			}
@@ -442,7 +443,6 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 
 		const endedAt = new Date().toISOString();
 		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }));
-		await writeArtifact(absoluteRunDir, "RUN.json", JSON.stringify({ flowPath: relativeFlowPath, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }, null, 2));
 		ui.complete("passed", `${relativeRunDir}/SUMMARY.md`);
 		return relativeRunDir;
 	} catch (error) {
@@ -455,7 +455,6 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 		for (let i = currentIndex + 1; i < steps.length; i++) steps[i].status = "skipped";
 		const endedAt = new Date().toISOString();
 		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", steps }));
-		await writeArtifact(absoluteRunDir, "RUN.json", JSON.stringify({ flowPath: relativeFlowPath, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", error: message, steps }, null, 2));
 		ui.complete("failed", `${relativeRunDir}/SUMMARY.md`);
 		throw error;
 	}
@@ -532,12 +531,12 @@ export default function flowExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("flow-runs", {
-		description: "Show recent Flow run artifact directories",
+		description: "Show recent Flow run summaries",
 		handler: async (_args, ctx) => {
 			const runs = listRunDirs(ctx.cwd, 12);
 			pi.sendMessage({
 				customType: "flow-runs",
-				content: `# Recent Flow Runs\n\n${runs.length ? runs.map((run) => `- \`${run}\`\n  - summary: \`${run}/SUMMARY.md\`\n  - manifest: \`${run}/RUN.json\``).join("\n") : "No Flow runs found in `.pi/flow/runs`."}`,
+				content: `# Recent Flow Runs\n\n${runs.length ? runs.map((run) => `- \`${run}\`\n  - summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs found in `.pi/flow/runs`."}`,
 				display: true,
 			}, { triggerTurn: false });
 		},
@@ -548,7 +547,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			pi.sendMessage({
 				customType: "flow-status",
-				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands or nested Pi agents.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run artifacts.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run artifacts are written to `.pi/flow/runs/<run-id>/`.",
+				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands or nested Pi agents.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
 				display: true,
 			}, { triggerTurn: false });
 		},

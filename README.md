@@ -1,13 +1,61 @@
 # Flow for Pi
 
-Flow is a Pi extension for running declarative coding-agent workflows.
+Flow is a Pi extension for turning repeatable agent work into simple workflows.
+
+## Explain it like I'm 5
+
+Prompting an agent is like saying:
+
+> "Please clean my room."
+
+A workflow is like giving the agent a checklist:
+
+1. Pick up the toys.
+2. Put books on the shelf.
+3. Check the floor is clear.
+4. Tell me what you did.
+
+That checklist matters because the agent does not have to guess the process every time. It follows the same useful steps, in the same order, and leaves notes behind so you can see what happened.
+
+## Why this is valuable
+
+Most people start with one big prompt:
+
+```text
+Build this feature, test it, review it, and summarize it.
+```
+
+That works sometimes, but it is fragile. The agent might skip planning, forget to run a check, or mix up implementation and review.
+
+Flow moves you from **prompting agents** to **building workflows**.
+
+Instead of hoping the agent remembers the process, you write the process down once:
+
+```text
+Plan → Check plan exists → Build → Review → Refine → Summarize
+```
+
+Then you can run it again and again.
+
+This gives you:
+
+- **Repeatability** — the same kind of task follows the same path every time.
+- **Visibility** — Pi shows which step is running now.
+- **Safety** — command steps can enforce hard gates, like `test -s PLAN.md`.
+- **Focus** — each agent step gets a small prompt and a limited tool list.
+- **Summaries** — every run writes one simple `SUMMARY.md` you can inspect later.
+- **Composability** — teams can share useful workflows instead of sharing long prompts.
+
+In short: prompts are one-off instructions; workflows are reusable operating procedures.
+
+## What a workflow is
 
 A workflow is a YAML file with ordered steps. Each step is either:
 
 - `command` — deterministic shell execution
 - `agent` — a nested Pi agent with a focused prompt and tool allowlist
 
-Flow shows the run live in Pi's UI and writes durable artifacts for every run.
+Flow shows the run live in Pi's UI and writes one simple `SUMMARY.md` for every run.
 
 Project workflows live in `.pi/workflows/<flow-name>.yaml`.
 
@@ -16,7 +64,7 @@ Project workflows live in `.pi/workflows/<flow-name>.yaml`.
 ```text
 /flows                  # list available workflows and recent runs
 /flow <flow.yml> <task> # run a workflow
-/flow-runs              # list recent run artifact directories
+/flow-runs              # list recent run summaries
 /flow-status            # show help
 ```
 
@@ -89,12 +137,12 @@ Supported step fields:
 Prompts and command strings support:
 
 ```text
-{{ .Task }}
-{{ .RunID }}
-{{ .RunDir }}
-{{ .CWD }}
-{{ .FlowPath }}
-{{ .StepName }}
+{{ .Task }}      # the task text passed to /flow
+{{ .RunID }}     # unique id for this run
+{{ .RunDir }}    # directory for this run
+{{ .CWD }}       # current working directory
+{{ .FlowPath }}  # workflow file path
+{{ .StepName }}  # current step name
 ```
 
 ## Built-in example
@@ -113,19 +161,19 @@ Run it with:
 
 The example does **not** commit, push, or open PRs. It leaves the final decision to you.
 
-## Artifacts
+## Run summaries
 
-Each run writes to:
+Each run writes one summary file:
 
 ```text
-.pi/flow/runs/<run-id>/
+.pi/flow/runs/<run-id>/SUMMARY.md
 ```
 
-Important files:
+`SUMMARY.md` is the human-readable record of what happened, including step status and compact step output.
 
-- `RUN.json` — machine-readable manifest
-- `SUMMARY.md` — human-readable run summary
-- `<step>.command.md` / `<step>.agent.md` — per-step output
+## Learn more
+
+See [`docs/architecture.md`](docs/architecture.md) for a simple explanation of how Flow works, how it compares with launching subagents directly, and how state moves between steps.
 
 ## Notes
 
