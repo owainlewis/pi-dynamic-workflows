@@ -1,0 +1,64 @@
+steps:
+  - name: preflight
+    label: Check GitHub demo preflight
+    type: command
+    timeoutSeconds: 60
+    run: gh auth status >/dev/null || { echo "GitHub CLI is not authenticated. Run: gh auth login" >&2; exit 1; }; git rev-parse --is-inside-work-tree >/dev/null || { echo "Not inside a git repository" >&2; exit 1; }; test -z "$(git status --porcelain)" || { echo "Working tree must be clean before the demo flow. Commit, stash, or reset local changes." >&2; git status --short >&2; exit 1; }; mkdir -p "{{ .RunDir }}" && git branch --show-current > "{{ .RunDir }}/BASE_BRANCH" && gh issue view "{{ .Task }}" --json number,title,url > "{{ .RunDir }}/ISSUE.json" || { echo "Could not read GitHub issue: {{ .Task }}" >&2; exit 1; }
+
+  - name: plan
+    label: Read issue and write plan
+    type: agent
+    tools: read,bash,write
+    timeoutSeconds: 600
+    prompt: prompts/GITHUB_ISSUE_PLAN.md
+
+  - name: create_branch
+    label: Create demo branch
+    type: command
+    timeoutSeconds: 60
+    run: issue=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).number)' "{{ .RunDir }}/ISSUE.json") && branch="flow-demo/issue-${issue}-{{ .RunID }}" && printf "%s\n" "$branch" > "{{ .RunDir }}/BRANCH" && git switch -c "$branch"
+
+  - name: implement
+    label: Implement planned change
+    type: agent
+    tools: read,bash,edit,write
+    timeoutSeconds: 1200
+    prompt: prompts/GITHUB_ISSUE_IMPLEMENT.md
+
+  - name: checks
+    label: Run project checks
+    type: command
+    timeoutSeconds: 600
+    run: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+
+  - name: review
+    label: Review implementation
+    type: agent
+    tools: read,bash,write
+    timeoutSeconds: 600
+    prompt: prompts/GITHUB_ISSUE_REVIEW.md
+
+  - name: refactor
+    label: Refactor pass
+    type: agent
+    tools: read,bash,edit,write
+    timeoutSeconds: 900
+    prompt: prompts/GITHUB_ISSUE_REFACTOR.md
+
+  - name: final_checks
+    label: Run final checks
+    type: command
+    timeoutSeconds: 600
+    run: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+
+  - name: open_draft_pr
+    label: Open draft PR when allowed
+    type: command
+    timeoutSeconds: 180
+    run: test "${FLOW_DEMO_ALLOW_PUSH:-}" = "1" || { echo "Set FLOW_DEMO_ALLOW_PUSH=1 to push and open a draft PR" > "{{ .RunDir }}/PR_SKIPPED"; exit 0; }; branch=$(cat "{{ .RunDir }}/BRANCH") && base=$(cat "{{ .RunDir }}/BASE_BRANCH") && git push -u origin "$branch" && gh pr create --draft --base "$base" --title "Demo issue workflow for {{ .Task }}" --body-file "{{ .RunDir }}/PR_BODY.md" > "{{ .RunDir }}/PR_URL"
+
+  - name: update_issue
+    label: Update issue when allowed
+    type: command
+    timeoutSeconds: 120
+    run: test "${FLOW_DEMO_UPDATE_ISSUE:-}" = "1" || { echo "Set FLOW_DEMO_UPDATE_ISSUE=1 to comment on the issue" > "{{ .RunDir }}/ISSUE_UPDATE_SKIPPED"; exit 0; }; if test -s "{{ .RunDir }}/PR_URL"; then gh issue comment "{{ .Task }}" --body "Flow demo opened draft PR: $(cat "{{ .RunDir }}/PR_URL")"; else gh issue comment "{{ .Task }}" --body "Flow demo completed locally. Push/PR creation was skipped."; fi
