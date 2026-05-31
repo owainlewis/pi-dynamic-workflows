@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -8,7 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 type StepStatus = "pending" | "running" | "passed" | "failed" | "skipped";
-type StepType = "agent" | "command";
+type StepType = "agent" | "command" | "loop";
 
 interface FlowStep {
 	name: string;
@@ -17,10 +18,16 @@ interface FlowStep {
 	prompt?: string;
 	run?: string;
 	tools?: string;
+	when?: string;
+	expect?: string;
+	until?: string;
+	maxIterations?: number;
+	freeze?: string;
 	timeoutSeconds?: number;
 }
 
 interface FlowDefinition {
+	description?: string;
 	steps: FlowStep[];
 }
 
@@ -144,6 +151,8 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 	const steps: FlowStep[] = [];
 	const seen = new Set<string>();
 	let current: Partial<FlowStep> | undefined;
+	let description: string | undefined;
+	let inSteps = false;
 
 	const finish = () => {
 		if (!current) return;
@@ -151,32 +160,48 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 		if (!/^[A-Za-z0-9_-]+$/.test(current.name)) throw new Error(`${flowPath}: invalid step name: ${current.name}`);
 		if (seen.has(current.name)) throw new Error(`${flowPath}: duplicate step name: ${current.name}`);
 		seen.add(current.name);
-		if (current.type !== "agent" && current.type !== "command") throw new Error(`${flowPath}: step ${current.name} must have type agent or command`);
+		if (current.type !== "agent" && current.type !== "command" && current.type !== "loop") throw new Error(`${flowPath}: step ${current.name} must have type agent, command, or loop`);
 		if (current.type === "agent" && !current.prompt) throw new Error(`${flowPath}: agent step ${current.name} is missing prompt`);
 		if (current.type === "command" && !current.run) throw new Error(`${flowPath}: command step ${current.name} is missing run`);
+		if (current.type === "loop") {
+			if (!current.prompt) throw new Error(`${flowPath}: loop step ${current.name} is missing prompt`);
+			if (!current.until) throw new Error(`${flowPath}: loop step ${current.name} is missing until`);
+			if (!current.maxIterations || !Number.isFinite(current.maxIterations) || current.maxIterations <= 0) throw new Error(`${flowPath}: loop step ${current.name} maxIterations must be positive`);
+			if (!current.freeze?.trim()) throw new Error(`${flowPath}: loop step ${current.name} is missing freeze`);
+		}
 		if (current.timeoutSeconds !== undefined && (!Number.isFinite(current.timeoutSeconds) || current.timeoutSeconds <= 0)) throw new Error(`${flowPath}: step ${current.name} timeoutSeconds must be positive`);
 		steps.push(current as FlowStep);
 	};
 
 	for (const rawLine of text.split(/\r?\n/)) {
 		const line = stripYamlComment(rawLine);
-		if (!line.trim() || /^\s*steps\s*:\s*$/.test(line)) continue;
+		if (!line.trim()) continue;
+		if (/^\s*steps\s*:\s*$/.test(line)) {
+			inSteps = true;
+			continue;
+		}
+		const descriptionMatch = line.match(/^description\s*:\s*(.*?)\s*$/);
+		if (descriptionMatch && !inSteps) {
+			if (description !== undefined) throw new Error(`${flowPath}: duplicate description`);
+			description = unquoteYamlValue(descriptionMatch[1]);
+			continue;
+		}
 		const stepStart = line.match(/^\s*-\s+name\s*:\s*(.+?)\s*$/);
 		if (stepStart) {
 			finish();
 			current = { name: unquoteYamlValue(stepStart[1]) };
 			continue;
 		}
-		const prop = line.match(/^\s+(name|type|label|prompt|run|tools|timeoutSeconds)\s*:\s*(.+?)\s*$/);
+		const prop = line.match(/^\s+(name|type|label|prompt|run|tools|when|expect|until|maxIterations|freeze|timeoutSeconds)\s*:\s*(.+?)\s*$/);
 		if (!prop) throw new Error(`${flowPath}: unsupported or malformed line: ${rawLine.trim()}`);
 		if (!current) current = {};
 		const key = prop[1];
 		const value = unquoteYamlValue(prop[2]);
-		(current as any)[key] = key === "timeoutSeconds" ? Number.parseInt(value, 10) : value;
+		(current as any)[key] = key === "timeoutSeconds" || key === "maxIterations" ? Number.parseInt(value, 10) : value;
 	}
 	finish();
 	if (steps.length === 0) throw new Error(`${flowPath}: no steps found`);
-	return { steps };
+	return { description, steps };
 }
 
 function renderTemplate(input: string, vars: FlowVars): string {
@@ -330,6 +355,51 @@ function summarizeAgentOutput(output: string): string {
 	return trimmed ? trimmed.slice(0, 2_000) : "Agent completed without a final text response.";
 }
 
+function hashProcessOutput(result: ProcessResult): string {
+	return createHash("sha256").update(`${result.stdout}\n${result.stderr}`).digest("hex");
+}
+
+function artifactPath(runDir: string, artifact: string): string {
+	const resolved = path.resolve(runDir, artifact);
+	const relative = path.relative(runDir, resolved);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`artifact path escapes run directory: ${artifact}`);
+	return resolved;
+}
+
+function assertExpectedArtifact(runDir: string, artifact: string): void {
+	const expectedPath = artifactPath(runDir, artifact);
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(expectedPath);
+	} catch {
+		throw new Error(`Expected artifact is missing: ${artifact}`);
+	}
+	if (!stat.isFile() || stat.size <= 0) throw new Error(`Expected artifact is empty or not a file: ${artifact}`);
+}
+
+function splitFreezePaths(freeze: string): string[] {
+	return freeze.split(/\s+/).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function frozenPathsSnapshot(freeze: string, cwd: string, timeoutSeconds: number, signal?: AbortSignal): Promise<string> {
+	const frozen = splitFreezePaths(freeze);
+	if (!frozen.length) throw new Error("loop freeze must name at least one path");
+	const paths = frozen.map(shellQuote).join(" ");
+	const command = `{ git status --porcelain --untracked-files=all -- ${paths}; git diff --binary -- ${paths}; }`;
+	const result = await runShell(command, cwd, timeoutSeconds, signal);
+	if (result.exitCode !== 0) throw new Error(`Could not check frozen paths:\n${result.stderr || result.stdout}`.trim());
+	return result.stdout;
+}
+
+async function assertFrozenPathsUnchanged(freeze: string, before: string, cwd: string, timeoutSeconds: number, signal?: AbortSignal): Promise<void> {
+	const after = await frozenPathsSnapshot(freeze, cwd, timeoutSeconds, signal);
+	if (after !== before) throw new Error(`Loop modified frozen path(s): ${freeze}`);
+}
+
 function summaryMarkdown(data: { flowPath: string; task: string; runId: string; runDir: string; startedAt: string; endedAt: string; status: "passed" | "failed"; steps: StepSummary[] }): string {
 	const durationMs = Math.max(0, Date.parse(data.endedAt) - Date.parse(data.startedAt));
 	const lines = [`# Flow Run ${data.status === "passed" ? "✅" : "❌"}`, "", `- status: ${data.status}`, `- flow: \`${data.flowPath}\``, `- run id: \`${data.runId}\``, `- run dir: \`${data.runDir}\``, `- duration: ${Math.round(durationMs / 1000)}s`, "", "## Task", "", data.task, "", "## Steps"];
@@ -342,36 +412,87 @@ function summaryMarkdown(data: { flowPath: string; task: string; runId: string; 
 }
 
 function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowStep[]) {
-	const statuses = steps.map((step) => ({ label: step.label ?? step.name, status: "pending" as StepStatus, detail: "", startedAt: 0 }));
+	const statuses = steps.map((step) => ({ label: step.label ?? step.name, type: step.type, status: "pending" as StepStatus, detail: "", startedAt: 0, endedAt: 0 }));
 	const startedAt = Date.now();
+	let activeIndex = 0;
+	let activeText = "starting";
+	const statusIcon = (status: StepStatus) => status === "passed" ? "✓" : status === "failed" ? "✗" : status === "running" ? "▶" : status === "skipped" ? "↷" : "○";
+	const duration = (step: typeof statuses[number]) => {
+		if (!step.startedAt) return "queued";
+		const end = step.endedAt || Date.now();
+		const seconds = Math.max(1, Math.round((end - step.startedAt) / 1000));
+		return `${seconds}s`;
+	};
 	const progressBar = () => {
 		const done = statuses.filter((step) => step.status === "passed" || step.status === "skipped").length;
 		const failed = statuses.some((step) => step.status === "failed");
-		const width = 24;
+		const width = 18;
 		const filled = Math.round((done / Math.max(1, statuses.length)) * width);
 		return `${color("█".repeat(filled), failed ? ANSI.red : ANSI.green)}${color("░".repeat(width - filled), ANSI.gray)} ${done}/${statuses.length}`;
 	};
+	const plainCell = (text: string, width: number) => truncate(text, Math.max(1, width)).padEnd(width).slice(0, width);
+	const cardRows = (index: number, width: number): string[] => {
+		const step = statuses[index];
+		const inner = width - 2;
+		const topLabel = ` ${statusIcon(step.status)} ${index + 1}/${statuses.length} `;
+		const line = "─".repeat(Math.max(0, inner - topLabel.length));
+		const meta = `${step.type} · ${step.status === "pending" ? "queued" : duration(step)}`;
+		return [
+			`┌${topLabel}${line}┐`,
+			`│${plainCell(step.label, inner)}│`,
+			`│${plainCell(meta, inner)}│`,
+			`│${plainCell(step.detail || (step.status === "pending" ? "waiting" : step.status), inner)}│`,
+			`└${"─".repeat(inner)}┘`,
+		];
+	};
+	const visualLines = (width: number): string[] => {
+		const safeWidth = Math.max(40, width - 2);
+		const cardWidth = safeWidth >= 120 ? 30 : safeWidth >= 88 ? 26 : Math.min(24, safeWidth);
+		const gap = "  →  ";
+		const perRow = Math.max(1, Math.floor((safeWidth + gap.length) / (cardWidth + gap.length)));
+		const rows: string[] = [];
+		for (let start = 0; start < statuses.length; start += perRow) {
+			const group = statuses.slice(start, start + perRow).map((_step, offset) => cardRows(start + offset, cardWidth));
+			for (let row = 0; row < 5; row++) rows.push(group.map((card) => card[row]).join(gap));
+			if (start + perRow < statuses.length) rows.push("", color("↓", ANSI.gray), "");
+		}
+		return rows;
+	};
+	const detailLines = (width: number): string[] => {
+		const step = statuses[Math.max(0, Math.min(activeIndex, statuses.length - 1))];
+		const safeWidth = Math.max(40, width - 2);
+		const inner = safeWidth - 2;
+		const title = step.status === "failed" ? " Failed step " : step.status === "running" ? " Active step " : " Step detail ";
+		const top = `┌${title}${"─".repeat(Math.max(0, inner - title.length))}┐`;
+		const body = [
+			`${statusIcon(step.status)} ${step.label}`,
+			`${step.type} · ${step.status} · ${duration(step)}`,
+			activeText,
+			`summary: ${runDir}/SUMMARY.md`,
+		];
+		const lines = [top];
+		for (const line of body) for (const wrapped of wrapTextWithAnsi(line, Math.max(20, inner))) lines.push(`│${plainCell(wrapped, inner)}│`);
+		lines.push(`└${"─".repeat(inner)}┘`);
+		return lines;
+	};
 	const render = (active: string) => {
 		if (!ctx.hasUI) return;
+		activeText = truncate(active, 220);
 		const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-		const lines = [
-			color("Flow", ANSI.softGreen + ANSI.bold),
-			`${color("Flow:", ANSI.cyan)} ${flowPath}`,
-			`${color("Run:", ANSI.cyan)} ${runDir} ${color("•", ANSI.gray)} ${progressBar()} ${color("•", ANSI.gray)} ${elapsed}s`,
-			"",
-			...statuses.map((step, index) => {
-				const symbol = step.status === "passed" ? color("✓", ANSI.green) : step.status === "failed" ? color("✗", ANSI.red) : step.status === "running" ? color("▶", ANSI.amber) : color("○", ANSI.gray);
-				const timer = step.status === "running" && step.startedAt ? color(` ${Math.round((Date.now() - step.startedAt) / 1000)}s`, ANSI.amber) : "";
-				return `${symbol} ${color(step.label.padEnd(24), statusColor(step.status))} ${color(`${index + 1}/${steps.length}`, ANSI.gray)}${timer}${step.detail ? color(` — ${step.detail}`, ANSI.dim) : ""}`;
-			}),
-			"",
-			`${color("Current:", ANSI.cyan)} ${active}`,
-		];
-		ctx.ui.setStatus("flow", `Flow ${progressBar()} • ${active}`);
+		ctx.ui.setStatus("flow", `Flow ${progressBar()} • ${activeText}`);
 		ctx.ui.setWidget("flow-progress", (_tui: any, _theme: any) => ({
 			render(width: number) {
+				const lines = [
+					`${color("Flow", ANSI.softGreen + ANSI.bold)} ${color(progressBar(), ANSI.reset)} ${color("•", ANSI.gray)} ${elapsed}s`,
+					`${color("Flow:", ANSI.cyan)} ${flowPath}`,
+					`${color("Run:", ANSI.cyan)} ${runDir}`,
+					"",
+					...visualLines(width),
+					"",
+					...detailLines(width),
+				];
 				const rendered: string[] = [];
-				for (const line of lines) for (const wrapped of wrapTextWithAnsi(line, Math.max(20, width - 2))) rendered.push(truncateToWidth(` ${wrapped}`, width));
+				for (const line of lines) rendered.push(truncateToWidth(` ${line}`, width));
 				return rendered;
 			},
 			invalidate() {},
@@ -379,16 +500,24 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 	};
 	return {
 		set(index: number, status: StepStatus, detail = "") {
+			activeIndex = index;
 			statuses[index].status = status;
 			statuses[index].detail = truncate(detail, 140);
-			if (status === "running") statuses[index].startedAt = Date.now();
+			if (status === "running") {
+				statuses[index].startedAt = Date.now();
+				statuses[index].endedAt = 0;
+			}
+			if (status === "passed" || status === "failed" || status === "skipped") statuses[index].endedAt = Date.now();
 			render(`${statuses[index].label}: ${detail || status}`);
 		},
 		detail(index: number, detail: string) {
+			activeIndex = index;
 			statuses[index].detail = truncate(detail, 140);
 			render(`${statuses[index].label}: ${detail}`);
 		},
 		complete(status: "passed" | "failed", active: string) {
+			const failedIndex = statuses.findIndex((step) => step.status === "failed");
+			activeIndex = failedIndex >= 0 ? failedIndex : Math.max(0, statuses.length - 1);
 			render(`${status === "passed" ? "complete" : "failed"}: ${active}`);
 			ctx.ui.setStatus("flow", status === "passed" ? "Flow complete" : "Flow failed");
 		},
@@ -415,6 +544,23 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 			const step = flow.steps[i];
 			const stepStartedAt = Date.now();
 			const vars: FlowVars = { Task: options.task, RunID: id, RunDir: relativeRunDir, CWD: options.cwd, FlowPath: relativeFlowPath, StepName: step.name };
+			if (step.when) {
+				const whenCommand = renderTemplate(step.when, vars);
+				steps[i].status = "running";
+				steps[i].detail = "checking condition";
+				ui.set(i, "running", "checking condition");
+				ui.detail(i, whenCommand);
+				const whenResult = await runShell(whenCommand, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
+				if (whenResult.exitCode !== 0) {
+					steps[i].status = "skipped";
+					steps[i].durationMs = Date.now() - stepStartedAt;
+					steps[i].detail = `skipped; when exited ${whenResult.exitCode}`;
+					steps[i].log = summarizeCommandResult(whenCommand, whenResult);
+					ui.set(i, "skipped", steps[i].detail);
+					continue;
+				}
+			}
+
 			steps[i].status = "running";
 			steps[i].detail = step.type;
 			ui.set(i, "running", step.type);
@@ -427,14 +573,51 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 				steps[i].durationMs = Date.now() - stepStartedAt;
 				steps[i].detail = result.exitCode === 0 ? `passed in ${result.durationMs}ms` : `failed with exit code ${result.exitCode}${result.timedOut ? " (timed out)" : ""}`;
 				if (result.exitCode !== 0) throw new Error(`Command step failed: ${step.label ?? step.name}\n${result.stderr || result.stdout}`.trim());
-			} else {
+			} else if (step.type === "agent") {
 				const promptPath = path.resolve(path.dirname(absoluteFlowPath), step.prompt!);
 				const prompt = renderTemplate(await readFile(promptPath, "utf8"), vars);
 				const tools = step.tools?.split(",").map((tool) => tool.trim()).filter(Boolean);
 				const output = await runAgent({ cwd: options.cwd, prompt, tools, timeoutSeconds: step.timeoutSeconds ?? parsePositiveInt(process.env.FLOW_AGENT_TIMEOUT_SECONDS, DEFAULT_AGENT_TIMEOUT_SECONDS), signal: options.signal, onProgress: (message) => ui.detail(i, message) });
+				if (step.expect) assertExpectedArtifact(absoluteRunDir, renderTemplate(step.expect, vars));
 				steps[i].log = summarizeAgentOutput(output);
 				steps[i].durationMs = Date.now() - stepStartedAt;
-				steps[i].detail = "agent completed";
+				steps[i].detail = step.expect ? `agent completed; found ${step.expect}` : "agent completed";
+			} else {
+				const until = renderTemplate(step.until!, vars);
+				const maxIterations = step.maxIterations!;
+				let gate = await runShell(until, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
+				let previousHash = hashProcessOutput(gate);
+				const logs = [`initial gate\n${summarizeCommandResult(until, gate)}`];
+				if (gate.exitCode === 0) {
+					steps[i].detail = "gate already passed";
+				} else {
+					const promptPath = path.resolve(path.dirname(absoluteFlowPath), step.prompt!);
+					const prompt = renderTemplate(await readFile(promptPath, "utf8"), vars);
+					const tools = step.tools?.split(",").map((tool) => tool.trim()).filter(Boolean);
+					const timeoutSeconds = step.timeoutSeconds ?? parsePositiveInt(process.env.FLOW_AGENT_TIMEOUT_SECONDS, DEFAULT_AGENT_TIMEOUT_SECONDS);
+					let passed = false;
+					for (let iteration = 1; iteration <= maxIterations; iteration++) {
+						ui.detail(i, `iteration ${iteration}/${maxIterations}: fixing`);
+						const frozenBefore = await frozenPathsSnapshot(step.freeze!, options.cwd, DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
+						const output = await runAgent({ cwd: options.cwd, prompt, tools, timeoutSeconds, signal: options.signal, onProgress: (message) => ui.detail(i, `iteration ${iteration}: ${message}`) });
+						await writeArtifact(absoluteRunDir, `${step.name.toUpperCase()}_${iteration}.md`, output.trim() || "Agent completed without a final text response.");
+						await assertFrozenPathsUnchanged(step.freeze!, frozenBefore, options.cwd, DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
+						ui.detail(i, `iteration ${iteration}/${maxIterations}: checking gate`);
+						gate = await runShell(until, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
+						logs.push(`iteration ${iteration} gate\n${summarizeCommandResult(until, gate)}`);
+						if (gate.exitCode === 0) {
+							passed = true;
+							steps[i].detail = `gate passed after ${iteration} iteration${iteration === 1 ? "" : "s"}`;
+							break;
+						}
+						const currentHash = hashProcessOutput(gate);
+						if (currentHash === previousHash) throw new Error(`Loop step stuck with no gate-output progress after iteration ${iteration}: ${step.label ?? step.name}`);
+						previousHash = currentHash;
+					}
+					if (!passed) throw new Error(`Loop step exhausted ${maxIterations} iteration${maxIterations === 1 ? "" : "s"}: ${step.label ?? step.name}\n${gate.stderr || gate.stdout}`.trim());
+				}
+				steps[i].log = logs.join("\n\n---\n\n").slice(0, 4_000);
+				steps[i].durationMs = Date.now() - stepStartedAt;
 			}
 
 			steps[i].status = "passed";
@@ -460,7 +643,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 	}
 }
 
-function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; source: "project" | "bundled" }> {
+function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; source: "project" | "bundled"; description?: string }> {
 	const candidates = [
 		{ dir: path.join(cwd, ".pi", "workflows"), source: "project" as const },
 		// Legacy project locations retained so existing workflows keep working.
@@ -469,7 +652,7 @@ function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; so
 		{ dir: path.join(EXTENSION_DIR, "flows"), source: "bundled" as const },
 	];
 	const seen = new Set<string>();
-	const flows: Array<{ label: string; file: string; source: "project" | "bundled" }> = [];
+	const flows: Array<{ label: string; file: string; source: "project" | "bundled"; description?: string }> = [];
 	for (const candidate of candidates) {
 		if (!fs.existsSync(candidate.dir)) continue;
 		for (const entry of fs.readdirSync(candidate.dir, { withFileTypes: true })) {
@@ -477,7 +660,14 @@ function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; so
 			const absolute = path.join(candidate.dir, entry.name);
 			if (seen.has(absolute)) continue;
 			seen.add(absolute);
-			flows.push({ label: entry.name.replace(/\.ya?ml$/i, ""), file: relativeForPrompt(cwd, absolute), source: candidate.source });
+			const file = relativeForPrompt(cwd, absolute);
+			let description: string | undefined;
+			try {
+				description = parseFlowYaml(fs.readFileSync(absolute, "utf8"), file).description;
+			} catch {
+				// Keep /flows useful even when a workflow file is still being edited.
+			}
+			flows.push({ label: entry.name.replace(/\.ya?ml$/i, ""), file, source: candidate.source, description });
 		}
 	}
 	return flows.sort((a, b) => `${a.source}:${a.label}`.localeCompare(`${b.source}:${b.label}`));
@@ -504,7 +694,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 			const runs = listRunDirs(ctx.cwd, 5);
 			pi.sendMessage({
 				customType: "flows",
-				content: `# Flows\n\n${flows.length ? flows.map((flow) => `- **${flow.label}** (${flow.source}) — \`${flow.file}\`\n  - run: \`/flow ${flow.file} "your task"\``).join("\n") : "No flows found. Add YAML files under `.pi/workflows/`."}\n\n## Recent runs\n\n${runs.length ? runs.map((run) => `- \`${run}\` — summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs yet."}`,
+				content: `# Flows\n\n${flows.length ? flows.map((flow) => `- **${flow.label}** (${flow.source}) — \`${flow.file}\`${flow.description ? `\n  - ${flow.description}` : ""}\n  - run: \`/flow ${flow.file} "your task"\``).join("\n") : "No flows found. Add YAML files under `.pi/workflows/`."}\n\n## Recent runs\n\n${runs.length ? runs.map((run) => `- \`${run}\` — summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs yet."}`,
 				display: true,
 			}, { triggerTurn: false });
 		},
@@ -547,7 +737,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			pi.sendMessage({
 				customType: "flow-status",
-				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands or nested Pi agents.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
+				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands, nested Pi agents, or guarded loops.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
 				display: true,
 			}, { triggerTurn: false });
 		},

@@ -13,5 +13,6 @@ Review the current diff for task completeness, correctness, scope control, maint
 Rules:
 - Do not edit files.
 - Be specific and actionable.
-- If there is no actionable feedback, say so explicitly.
+- Prefix each actionable finding with `ISSUE:` so conditional refine steps can detect it.
+- If there is no actionable feedback, say so explicitly and do not include `ISSUE:`.
 - Write your review to {{ .RunDir }}/REVIEW.md.

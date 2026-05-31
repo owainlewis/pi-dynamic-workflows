@@ -1,3 +1,4 @@
+description: Clean up local and optional remote artifacts from the GitHub issue demo workflow.
 steps:
   - name: preflight
     label: Check cleanup target

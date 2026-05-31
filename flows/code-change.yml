@@ -1,15 +1,11 @@
+description: Plan, implement, review, refine, and summarize a focused code change.
 steps:
   - name: plan
     label: Plan the change
     type: agent
     tools: read,bash,write
     prompt: prompts/PLAN.md
-
-  - name: check_plan
-    label: Validate plan artifact
-    type: command
-    timeoutSeconds: 30
-    run: test -s "{{ .RunDir }}/PLAN.md" || { echo "Missing plan artifact: {{ .RunDir }}/PLAN.md" >&2; exit 1; }
+    expect: PLAN.md
 
   - name: build
     label: Implement change
@@ -17,17 +13,34 @@ steps:
     tools: read,bash,edit,write
     prompt: prompts/BUILD.md
 
+  - name: fix_until_green
+    label: Fix until checks pass
+    type: loop
+    tools: read,bash,edit,write
+    prompt: prompts/FIX.md
+    until: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+    maxIterations: 4
+    freeze: "test/ tests/ spec/ specs/ __tests__/"
+
   - name: review
     label: Review implementation
     type: agent
-    tools: read,bash
+    tools: read,bash,write
     prompt: prompts/REVIEW.md
+    expect: REVIEW.md
 
   - name: refine
     label: Refine implementation
     type: agent
     tools: read,bash,edit,write
+    when: grep -q "ISSUE" "{{ .RunDir }}/REVIEW.md"
     prompt: prompts/REFINE.md
+
+  - name: reverify
+    label: Re-run checks
+    type: command
+    timeoutSeconds: 600
+    run: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
 
   - name: summarize
     label: Write final summary

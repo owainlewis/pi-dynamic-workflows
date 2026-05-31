@@ -32,7 +32,7 @@ Flow moves you from **prompting agents** to **building workflows**.
 Instead of hoping the agent remembers the process, you write the process down once:
 
 ```text
-Plan → Check plan exists → Build → Review → Refine → Summarize
+Plan → Check plan exists → Build → Fix until green → Review → Refine when needed → Summarize
 ```
 
 Then you can run it again and again.
@@ -50,10 +50,11 @@ In short: prompts are one-off instructions; workflows are reusable operating pro
 
 ## What a workflow is
 
-A workflow is a YAML file with ordered steps. Each step is either:
+A workflow is a YAML file with ordered steps. Each step is one of:
 
 - `command` — deterministic shell execution
 - `agent` — a nested Pi agent with a focused prompt and tool allowlist
+- `loop` — a guarded agent loop that fixes until a deterministic command passes
 
 Flow shows the run live in Pi's UI and writes one simple `SUMMARY.md` for every run.
 
@@ -100,6 +101,7 @@ Then run one with:
 ## Workflow format
 
 ```yaml
+description: Plan, build, and check a small code change.
 steps:
   - name: plan
     label: Plan the change
@@ -120,16 +122,28 @@ steps:
     prompt: prompts/BUILD.md
 ```
 
+Top-level workflow fields:
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `description` | no | Single-line summary shown by `/flows`. |
+| `steps` | yes | Ordered workflow steps. |
+
 Supported step fields:
 
 | Field | Required | Description |
 | --- | --- | --- |
 | `name` | yes | Stable step id. Use letters, numbers, `_`, or `-`. |
-| `type` | yes | `agent` or `command`. |
+| `type` | yes | `agent`, `command`, or `loop`. |
 | `label` | no | Human-friendly UI label. |
-| `prompt` | agent | Prompt file path, relative to the workflow file. |
+| `prompt` | agent/loop | Prompt file path, relative to the workflow file. |
 | `run` | command | Shell command to run. |
-| `tools` | agent | Comma-separated Pi tools for the nested agent. Defaults to `read,bash,edit,write`. |
+| `tools` | agent/loop | Comma-separated Pi tools for the nested agent. Defaults to `read,bash,edit,write`. |
+| `when` | no | Shell command condition. If it exits non-zero, the step is marked `skipped`. |
+| `expect` | agent | Run-dir artifact that must exist and be non-empty after the agent step, for example `REVIEW.md`. |
+| `until` | loop | Deterministic shell gate. The loop passes when this exits 0. |
+| `maxIterations` | loop | Required positive hard cap for loop steps. |
+| `freeze` | loop | Required space-separated paths the loop body must not modify, for example `test/ spec/`. |
 | `timeoutSeconds` | no | Per-step timeout. Commands default to 120s. Agents default to 900s. |
 
 ## Template variables
@@ -150,7 +164,7 @@ Prompts and command strings support:
 Flow includes `flows/code-change.yml`, a supervised coding workflow:
 
 ```text
-Plan the change → Validate plan artifact → Implement change → Review implementation → Refine implementation → Write final summary
+Plan the change → Implement change → Fix until checks pass → Review implementation → Refine only if review found issues → Write final summary
 ```
 
 Run it with:
@@ -178,7 +192,8 @@ See [`docs/architecture.md`](docs/architecture.md) for a simple explanation of h
 ## Notes
 
 - Flow runs steps sequentially.
-- A failed command, agent error, or timeout stops the workflow.
-- Agent steps pass if the nested Pi process exits successfully.
-- Use deterministic command steps for gates that must be reliable.
+- A failed command, agent error, missing `expect` artifact, loop exhaustion, or timeout stops the workflow.
+- Agent steps pass if the nested Pi process exits successfully; use `expect` for artifact-producing agents.
+- Use deterministic command steps or `loop.until` for gates that must be reliable.
+- Keep state in files like `PLAN.md` and `REVIEW.md`; Flow does not implicitly pass one agent's final message to the next step.
 - Set `FLOW_AGENT_TIMEOUT_SECONDS` to override the default agent timeout.

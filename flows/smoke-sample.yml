@@ -1,3 +1,4 @@
+description: Run an end-to-end smoke test with one agent step and deterministic validation.
 steps:
   - name: prepare_sample
     label: Prepare sample workspace

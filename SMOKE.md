@@ -8,6 +8,14 @@ pi --no-session -e ./index.ts --mode json -p '/flow-status'
 
 Expected: command exits successfully and prints Flow help.
 
+## List bundled workflows
+
+```bash
+pi --no-session -e ./index.ts --mode json -p '/flows'
+```
+
+Expected: bundled workflows are listed with description lines.
+
 ## Bundled command-only sample flow, no model required
 
 This flow includes short pauses so you can see progress in the Pi UI.
@@ -90,6 +98,27 @@ Expected:
 - the command exits successfully
 - `.pi/flow/runs/<run-id>/SUMMARY.md` exists
 - `SUMMARY.md` records both command steps
+
+## Conditional and already-satisfied loop path, no model required
+
+Use a disposable git repo and a workflow where `when` skips one command and `loop.until` passes before the agent body or prompt file is used.
+
+```yaml
+steps:
+  - name: skipped
+    type: command
+    when: test -s missing-file
+    run: exit 1
+
+  - name: already_green
+    type: loop
+    prompt: prompts/FIX.md
+    until: test 1 = 1
+    maxIterations: 1
+    freeze: "test/"
+```
+
+Expected: `SUMMARY.md` records `skipped` as skipped and `already_green` as passed.
 
 ## Failure path
 

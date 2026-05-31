@@ -125,6 +125,8 @@ They are good for things like:
 
 A command either exits successfully or fails. That makes it reliable as a gate.
 
+Any step can also have `when:`. Flow runs that shell command first. If it exits non-zero, the step is skipped instead of failed.
+
 ### 5. Agent steps
 
 An agent step launches a focused nested Pi agent.
@@ -147,7 +149,31 @@ The nested agent gets:
 
 The nested agent does **not** get the whole parent chat as its memory. It gets the prompt for that step.
 
+Agent steps that write an artifact should use `expect:` so Flow fails if the file is missing or empty:
+
+```yaml
+- name: review
+  type: agent
+  prompt: prompts/REVIEW.md
+  expect: REVIEW.md
+```
+
 That makes it easier to control.
+
+### 6. Loop steps
+
+A loop step is the safe form of "test, fix, test again". It runs the `until` command first. If the command already passes, the body agent never runs. Otherwise Flow runs the body agent, checks that frozen paths were not modified, and repeats until the gate passes or `maxIterations` is exhausted.
+
+```yaml
+- name: fix_until_green
+  type: loop
+  prompt: prompts/FIX.md
+  until: npm test
+  maxIterations: 4
+  freeze: "test/ spec/"
+```
+
+Flow requires `maxIterations` and `freeze` so workflows cannot express an unbounded or unfenced loop.
 
 ## What happens during a run
 
@@ -163,12 +189,14 @@ Flow does this:
 2. Creates `.pi/flow/runs/<run-id>/`.
 3. Shows the Flow panel in Pi.
 4. Starts the first step.
-5. If the step is `command`, runs shell code.
-6. If the step is `agent`, starts a nested Pi process with that step prompt.
-7. Records compact step output in memory.
-8. Marks the step passed or failed.
-9. Moves to the next step.
-10. Writes one `SUMMARY.md` file.
+5. If the step has `when`, runs the condition and skips on non-zero exit.
+6. If the step is `command`, runs shell code.
+7. If the step is `agent`, starts a nested Pi process with that step prompt and checks any `expect` artifact.
+8. If the step is `loop`, repeats a guarded agent body until its deterministic gate passes.
+9. Records compact step output in memory.
+10. Marks the step passed, failed, or skipped.
+11. Moves to the next step.
+12. Writes one `SUMMARY.md` file.
 
 ## How state is handled
 
@@ -232,7 +260,7 @@ Review step reads the diff and writes REVIEW.md
 Refine step reads REVIEW.md and fixes issues
 ```
 
-This is simpler and safer than hoping a later agent remembers what an earlier agent thought.
+This is simpler and safer than hoping a later agent remembers what an earlier agent thought. Flow intentionally does not implicitly pass one agent's final text into the next step.
 
 ## Flow vs launching subagents directly
 

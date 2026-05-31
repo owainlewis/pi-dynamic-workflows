@@ -1,3 +1,4 @@
+description: Demonstrate a guarded GitHub issue workflow from planning through optional draft PR creation.
 steps:
   - name: preflight
     label: Check GitHub demo preflight
@@ -11,6 +12,7 @@ steps:
     tools: read,bash,write
     timeoutSeconds: 600
     prompt: prompts/GITHUB_ISSUE_PLAN.md
+    expect: PLAN.md
 
   - name: create_branch
     label: Create demo branch
@@ -25,11 +27,15 @@ steps:
     timeoutSeconds: 1200
     prompt: prompts/GITHUB_ISSUE_IMPLEMENT.md
 
-  - name: checks
-    label: Run project checks
-    type: command
-    timeoutSeconds: 600
-    run: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+  - name: fix_until_green
+    label: Fix until checks pass
+    type: loop
+    tools: read,bash,edit,write
+    timeoutSeconds: 1200
+    prompt: prompts/GITHUB_ISSUE_FIX.md
+    until: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+    maxIterations: 4
+    freeze: "test/ tests/ spec/ specs/ __tests__/"
 
   - name: review
     label: Review implementation
@@ -37,12 +43,14 @@ steps:
     tools: read,bash,write
     timeoutSeconds: 600
     prompt: prompts/GITHUB_ISSUE_REVIEW.md
+    expect: REVIEW.md
 
   - name: refactor
     label: Refactor pass
     type: agent
     tools: read,bash,edit,write
     timeoutSeconds: 900
+    when: grep -q "ISSUE" "{{ .RunDir }}/REVIEW.md"
     prompt: prompts/GITHUB_ISSUE_REFACTOR.md
 
   - name: final_checks

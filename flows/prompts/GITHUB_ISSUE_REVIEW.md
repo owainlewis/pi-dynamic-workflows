@@ -18,4 +18,6 @@ Write `{{ .RunDir }}/REVIEW.md` with:
 - missing tests or validation
 - whether the implementation appears ready for a draft PR
 
+Prefix each actionable finding with `ISSUE:` so conditional refactor steps can detect it. If there is no actionable feedback, say so and do not include `ISSUE:`.
+
 Do not modify source files in this step.

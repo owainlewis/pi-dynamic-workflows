@@ -1,3 +1,4 @@
+description: Run a command-only smoke test that creates, validates, and cleans up sample artifacts.
 steps:
   - name: prepare_sample
     label: Prepare command-only sample
