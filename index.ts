@@ -58,6 +58,20 @@ interface ProcessResult {
 	timedOut: boolean;
 }
 
+interface FlowRunState {
+	version: 1;
+	flowPath: string;
+	flowHash?: string;
+	task: string;
+	runId: string;
+	runDir: string;
+	startedAt: string;
+	endedAt?: string;
+	status: "running" | "passed" | "failed";
+	git?: { branch?: string; commit?: string };
+	steps: StepSummary[];
+}
+
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
 const DEFAULT_AGENT_TIMEOUT_SECONDS = 900;
@@ -355,8 +369,12 @@ function summarizeAgentOutput(output: string): string {
 	return trimmed ? trimmed.slice(0, 2_000) : "Agent completed without a final text response.";
 }
 
+function hashText(input: string): string {
+	return createHash("sha256").update(input).digest("hex");
+}
+
 function hashProcessOutput(result: ProcessResult): string {
-	return createHash("sha256").update(`${result.stdout}\n${result.stderr}`).digest("hex");
+	return hashText(`${result.stdout}\n${result.stderr}`);
 }
 
 function artifactPath(runDir: string, artifact: string): string {
@@ -400,6 +418,72 @@ async function assertFrozenPathsUnchanged(freeze: string, before: string, cwd: s
 	if (after !== before) throw new Error(`Loop modified frozen path(s): ${freeze}`);
 }
 
+async function writeRunState(runDir: string, state: FlowRunState): Promise<void> {
+	await writeArtifact(runDir, "STATE.json", JSON.stringify(state, null, 2));
+}
+
+function parseSummaryMarkdown(text: string, runDirFallback: string): FlowRunState {
+	const value = (name: string) => text.match(new RegExp("^- " + name + ": `?([^\\n`]+)`?", "m"))?.[1]?.trim();
+	const task = text.match(/## Task\n\n([\s\S]*?)\n\n## Steps/)?.[1]?.trim();
+	const stepBlocks = text.split(/\n### /).slice(1);
+	const steps = stepBlocks.map((block) => {
+		const heading = block.split("\n", 1)[0].replace(/^[✅❌⏭️◻️]\s*/, "").trim();
+		const field = (name: string) => block.match(new RegExp(`^- ${name}: ([^\\n]+)`, "m"))?.[1]?.trim() ?? "";
+		return {
+			name: field("name"),
+			label: heading,
+			type: field("type") as StepType,
+			status: field("status") as StepStatus,
+			detail: field("detail") === "n/a" ? "" : field("detail"),
+		} satisfies StepSummary;
+	}).filter((step) => step.name && (step.type === "agent" || step.type === "command" || step.type === "loop"));
+	const flowPath = value("flow");
+	if (!flowPath || !task || !steps.length) throw new Error("Run is missing STATE.json and SUMMARY.md could not be parsed for resume metadata");
+	return {
+		version: 1,
+		flowPath,
+		task,
+		runId: value("run id") ?? path.basename(runDirFallback),
+		runDir: value("run dir") ?? runDirFallback,
+		startedAt: new Date().toISOString(),
+		status: value("status") === "passed" ? "passed" : "failed",
+		steps,
+	};
+}
+
+async function readRunState(cwd: string, runDirInput: string): Promise<FlowRunState> {
+	const runDir = path.resolve(cwd, runDirInput);
+	try {
+		return JSON.parse(await readFile(path.join(runDir, "STATE.json"), "utf8")) as FlowRunState;
+	} catch {
+		return parseSummaryMarkdown(await readFile(path.join(runDir, "SUMMARY.md"), "utf8"), relativeForPrompt(cwd, runDir));
+	}
+}
+
+function resumeStartIndex(state: FlowRunState, fromStep?: string): number {
+	if (fromStep) {
+		const index = state.steps.findIndex((step) => step.name === fromStep);
+		if (index < 0) throw new Error(`Step not found in prior run: ${fromStep}`);
+		return index;
+	}
+	const failed = state.steps.findIndex((step) => step.status === "failed");
+	if (failed >= 0) return failed;
+	const skipped = state.steps.findIndex((step) => step.status === "skipped");
+	if (skipped >= 0) return skipped;
+	throw new Error("Run has no failed or skipped step to resume");
+}
+
+async function gitSnapshot(cwd: string, signal?: AbortSignal): Promise<{ branch?: string; commit?: string }> {
+	const [branch, commit] = await Promise.all([
+		runShell("git branch --show-current", cwd, 10, signal).catch(() => undefined),
+		runShell("git rev-parse HEAD", cwd, 10, signal).catch(() => undefined),
+	]);
+	return {
+		branch: branch?.exitCode === 0 ? branch.stdout.trim() || undefined : undefined,
+		commit: commit?.exitCode === 0 ? commit.stdout.trim() || undefined : undefined,
+	};
+}
+
 function summaryMarkdown(data: { flowPath: string; task: string; runId: string; runDir: string; startedAt: string; endedAt: string; status: "passed" | "failed"; steps: StepSummary[] }): string {
 	const durationMs = Math.max(0, Date.parse(data.endedAt) - Date.parse(data.startedAt));
 	const lines = [`# Flow Run ${data.status === "passed" ? "✅" : "❌"}`, "", `- status: ${data.status}`, `- flow: \`${data.flowPath}\``, `- run id: \`${data.runId}\``, `- run dir: \`${data.runDir}\``, `- duration: ${Math.round(durationMs / 1000)}s`, "", "## Task", "", data.task, "", "## Steps"];
@@ -411,8 +495,8 @@ function summaryMarkdown(data: { flowPath: string; task: string; runId: string; 
 	return `${lines.join("\n").trim()}\n`;
 }
 
-function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowStep[]) {
-	const statuses = steps.map((step) => ({ label: step.label ?? step.name, type: step.type, status: "pending" as StepStatus, detail: "", startedAt: 0, endedAt: 0 }));
+function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowStep[], initialSteps?: StepSummary[]) {
+	const statuses = steps.map((step, index) => ({ label: step.label ?? step.name, type: step.type, status: initialSteps?.[index]?.status ?? "pending" as StepStatus, detail: initialSteps?.[index]?.detail ?? "", startedAt: 0, endedAt: initialSteps?.[index]?.status === "passed" || initialSteps?.[index]?.status === "failed" || initialSteps?.[index]?.status === "skipped" ? Date.now() : 0 }));
 	const startedAt = Date.now();
 	let activeIndex = 0;
 	let activeText = "starting";
@@ -514,22 +598,36 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 	};
 }
 
-async function runFlow(options: { cwd: string; flowPath: string; task: string; signal?: AbortSignal; ctx: any }): Promise<string> {
+async function runFlow(options: { cwd: string; flowPath: string; task: string; signal?: AbortSignal; ctx: any; resume?: { runDir: string; runId: string; startedAt: string; steps: StepSummary[]; startAtIndex: number; expectedFlowHash?: string } }): Promise<string> {
 	const absoluteFlowPath = path.resolve(options.cwd, options.flowPath);
 	const relativeFlowPath = relativeForPrompt(options.cwd, absoluteFlowPath);
-	const flow = parseFlowYaml(await readFile(absoluteFlowPath, "utf8"), relativeFlowPath);
-	const id = runId();
-	const absoluteRunDir = path.join(options.cwd, ".pi", "flow", "runs", id);
+	const flowText = await readFile(absoluteFlowPath, "utf8");
+	const flowHash = hashText(flowText);
+	if (options.resume?.expectedFlowHash && options.resume.expectedFlowHash !== flowHash) throw new Error(`Workflow file changed since prior run: ${relativeFlowPath}`);
+	const flow = parseFlowYaml(flowText, relativeFlowPath);
+	if (options.resume) {
+		const mismatch = options.resume.steps.find((step, index) => flow.steps[index]?.name !== step.name);
+		if (mismatch) throw new Error(`Workflow steps differ from prior run near step: ${mismatch.name}`);
+	}
+	const id = options.resume?.runId ?? runId();
+	const absoluteRunDir = options.resume ? path.resolve(options.cwd, options.resume.runDir) : path.join(options.cwd, ".pi", "flow", "runs", id);
 	const relativeRunDir = relativeForPrompt(options.cwd, absoluteRunDir);
-	const startedAt = new Date().toISOString();
-	const steps: StepSummary[] = flow.steps.map((step) => ({ name: step.name, label: step.label ?? step.name, type: step.type, status: "pending", detail: "" }));
-	const ui = createFlowUi(options.ctx, relativeFlowPath, relativeRunDir, flow.steps);
+	const startedAt = options.resume?.startedAt ?? new Date().toISOString();
+	const steps: StepSummary[] = flow.steps.map((step, index) => {
+		const previous = options.resume?.steps[index];
+		if (previous?.name === step.name && index < (options.resume?.startAtIndex ?? 0)) return { ...previous, status: previous.status === "running" ? "pending" : previous.status };
+		return { name: step.name, label: step.label ?? step.name, type: step.type, status: "pending", detail: "" };
+	});
+	const ui = createFlowUi(options.ctx, relativeFlowPath, relativeRunDir, flow.steps, steps);
+	const git = await gitSnapshot(options.cwd, options.signal);
+	const runState = (status: FlowRunState["status"], endedAt?: string): FlowRunState => ({ version: 1, flowPath: relativeFlowPath, flowHash, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status, git, steps });
 
 	await mkdir(absoluteRunDir, { recursive: true });
+	await writeRunState(absoluteRunDir, runState("running"));
 
 	let currentIndex = -1;
 	try {
-		for (let i = 0; i < flow.steps.length; i++) {
+		for (let i = options.resume?.startAtIndex ?? 0; i < flow.steps.length; i++) {
 			currentIndex = i;
 			const step = flow.steps[i];
 			const stepStartedAt = Date.now();
@@ -547,6 +645,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 					steps[i].detail = `skipped; when exited ${whenResult.exitCode}`;
 					steps[i].log = summarizeCommandResult(whenCommand, whenResult);
 					ui.set(i, "skipped", steps[i].detail);
+					await writeRunState(absoluteRunDir, runState("running"));
 					continue;
 				}
 			}
@@ -612,9 +711,11 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 
 			steps[i].status = "passed";
 			ui.set(i, "passed", steps[i].detail);
+			await writeRunState(absoluteRunDir, runState("running"));
 		}
 
 		const endedAt = new Date().toISOString();
+		await writeRunState(absoluteRunDir, runState("passed", endedAt));
 		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }));
 		ui.complete("passed", `${relativeRunDir}/SUMMARY.md`);
 		return relativeRunDir;
@@ -627,6 +728,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 		}
 		for (let i = currentIndex + 1; i < steps.length; i++) steps[i].status = "skipped";
 		const endedAt = new Date().toISOString();
+		await writeRunState(absoluteRunDir, runState("failed", endedAt));
 		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", steps }));
 		ui.complete("failed", `${relativeRunDir}/SUMMARY.md`);
 		throw error;
@@ -691,15 +793,33 @@ export default function flowExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("flow", {
-		description: "Run a YAML workflow: /flow <flow.yml> <task>",
+		description: "Run or resume a YAML workflow: /flow <flow.yml> <task> or /flow resume <run-dir>",
 		handler: async (args, ctx) => {
-			const match = args.trim().match(/^(\S+)\s+([\s\S]+)$/);
-			if (!match) {
-				ctx.ui.notify("Usage: /flow <flow.yml> <task>", "error");
-				return;
-			}
-			const [, flowPath, task] = match;
+			const trimmed = args.trim();
 			try {
+				const resumeMatch = trimmed.match(/^resume\s+(\S+)(?:\s+--from\s+([A-Za-z0-9_-]+))?\s*$/);
+				if (resumeMatch) {
+					const state = await readRunState(ctx.cwd, resumeMatch[1]);
+					const startAtIndex = resumeStartIndex(state, resumeMatch[2]);
+					const runDir = await runFlow({ cwd: ctx.cwd, flowPath: state.flowPath, task: state.task, signal: ctx.signal, ctx, resume: { runDir: state.runDir, runId: state.runId, startedAt: state.startedAt, steps: state.steps, startAtIndex, expectedFlowHash: state.flowHash } });
+					pi.sendMessage({ customType: "flow-complete", content: `# Flow Resume Complete\n\n- Flow: \`${state.flowPath}\`\n- Run: \`${runDir}\`\n- Resumed from: \`${state.steps[startAtIndex]?.name ?? startAtIndex}\`\n- Summary: \`${runDir}/SUMMARY.md\``, display: true }, { triggerTurn: false });
+					return;
+				}
+
+				const rerunMatch = trimmed.match(/^rerun\s+(\S+)\s*$/);
+				if (rerunMatch) {
+					const state = await readRunState(ctx.cwd, rerunMatch[1]);
+					const runDir = await runFlow({ cwd: ctx.cwd, flowPath: state.flowPath, task: state.task, signal: ctx.signal, ctx });
+					pi.sendMessage({ customType: "flow-complete", content: `# Flow Rerun Complete\n\n- Flow: \`${state.flowPath}\`\n- Run: \`${runDir}\`\n- Summary: \`${runDir}/SUMMARY.md\``, display: true }, { triggerTurn: false });
+					return;
+				}
+
+				const match = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
+				if (!match) {
+					ctx.ui.notify("Usage: /flow <flow.yml> <task> or /flow resume <run-dir>", "error");
+					return;
+				}
+				const [, flowPath, task] = match;
 				const runDir = await runFlow({ cwd: ctx.cwd, flowPath, task, signal: ctx.signal, ctx });
 				pi.sendMessage({ customType: "flow-complete", content: `# Flow Complete\n\n- Flow: \`${flowPath}\`\n- Run: \`${runDir}\`\n- Summary: \`${runDir}/SUMMARY.md\``, display: true }, { triggerTurn: false });
 			} catch (error) {
@@ -727,7 +847,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			pi.sendMessage({
 				customType: "flow-status",
-				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands, nested Pi agents, or guarded loops.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
+				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands, nested Pi agents, or guarded loops.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow resume <run-dir>` — continue a failed run.\n- `/flow rerun <run-dir>` — start over with the same workflow and task.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
 				display: true,
 			}, { triggerTurn: false });
 		},

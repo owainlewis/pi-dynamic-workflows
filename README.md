@@ -56,17 +56,20 @@ A workflow is a YAML file with ordered steps. Each step is one of:
 - `agent` — a nested Pi agent with a focused prompt and tool allowlist
 - `loop` — a guarded agent loop that fixes until a deterministic command passes
 
-Flow shows the run live in Pi's UI and writes one simple `SUMMARY.md` for every run.
+Flow shows each run live in Pi's UI and writes one simple `SUMMARY.md` for every run.
 
 Project workflows live in `.pi/workflows/<flow-name>.yaml`.
 
 ## Commands
 
 ```text
-/flows                  # list available workflows and recent runs
-/flow <flow.yml> <task> # run a workflow
-/flow-runs              # list recent run summaries
-/flow-status            # show help
+/flows                     # list available workflows and recent runs
+/flow <flow.yml> <task>    # run a workflow
+/flow resume <run-dir>     # continue a failed run from the failed/skipped step
+/flow resume <run-dir> --from <step>
+/flow rerun <run-dir>      # start over with the same workflow and task
+/flow-runs                 # list recent run summaries
+/flow-status               # show help
 ```
 
 ## Install / run
@@ -177,13 +180,32 @@ The example does **not** commit, push, or open PRs. It leaves the final decision
 
 ## Run summaries
 
-Each run writes one summary file:
+Each run writes:
 
 ```text
 .pi/flow/runs/<run-id>/SUMMARY.md
+.pi/flow/runs/<run-id>/STATE.json
 ```
 
-`SUMMARY.md` is the human-readable record of what happened, including step status and compact step output.
+`SUMMARY.md` is the human-readable record of what happened, including step status and compact step output. `STATE.json` is the machine-readable state used by resume.
+
+Resume a failed run with:
+
+```text
+/flow resume .pi/flow/runs/<run-id>
+```
+
+Flow resumes from the first failed step, or the first skipped step if there is no failed step. Already-passed steps are not re-run. To force a specific step:
+
+```text
+/flow resume .pi/flow/runs/<run-id> --from reverify
+```
+
+To start over with the same workflow and task:
+
+```text
+/flow rerun .pi/flow/runs/<run-id>
+```
 
 ## Learn more
 

@@ -139,3 +139,18 @@ Expected:
 - Pi command exits successfully because the slash command handled the error
 - the emitted Flow message contains `Flow Error`
 - `SUMMARY.md` records the failed step
+- `STATE.json` exists beside `SUMMARY.md`
+
+## Resume path
+
+After fixing the failing workflow command, resume the same run:
+
+```text
+/flow resume .pi/flow/runs/<failed-run-id>
+```
+
+Expected:
+
+- already-passed steps are not re-run
+- resume starts from the failed step
+- `SUMMARY.md` and `STATE.json` are updated in the same run directory
