@@ -431,32 +431,21 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		return `${color("█".repeat(filled), failed ? ANSI.red : ANSI.green)}${color("░".repeat(width - filled), ANSI.gray)} ${done}/${statuses.length}`;
 	};
 	const plainCell = (text: string, width: number) => truncate(text, Math.max(1, width)).padEnd(width).slice(0, width);
-	const cardRows = (index: number, width: number): string[] => {
-		const step = statuses[index];
-		const inner = width - 2;
-		const topLabel = ` ${statusIcon(step.status)} ${index + 1}/${statuses.length} `;
-		const line = "─".repeat(Math.max(0, inner - topLabel.length));
-		const meta = `${step.type} · ${step.status === "pending" ? "queued" : duration(step)}`;
-		return [
-			`┌${topLabel}${line}┐`,
-			`│${plainCell(step.label, inner)}│`,
-			`│${plainCell(meta, inner)}│`,
-			`│${plainCell(step.detail || (step.status === "pending" ? "waiting" : step.status), inner)}│`,
-			`└${"─".repeat(inner)}┘`,
-		];
-	};
-	const visualLines = (width: number): string[] => {
+	const checklistLines = (width: number): string[] => {
 		const safeWidth = Math.max(40, width - 2);
-		const cardWidth = safeWidth >= 120 ? 30 : safeWidth >= 88 ? 26 : Math.min(24, safeWidth);
-		const gap = "  →  ";
-		const perRow = Math.max(1, Math.floor((safeWidth + gap.length) / (cardWidth + gap.length)));
-		const rows: string[] = [];
-		for (let start = 0; start < statuses.length; start += perRow) {
-			const group = statuses.slice(start, start + perRow).map((_step, offset) => cardRows(start + offset, cardWidth));
-			for (let row = 0; row < 5; row++) rows.push(group.map((card) => card[row]).join(gap));
-			if (start + perRow < statuses.length) rows.push("", color("↓", ANSI.gray), "");
-		}
-		return rows;
+		const numberWidth = String(statuses.length).length;
+		return statuses.map((step, index) => {
+			const symbol = color(statusIcon(step.status), statusColor(step.status));
+			const count = color(`(${String(index + 1).padStart(numberWidth, " ")}/${statuses.length})`, ANSI.gray);
+			const label = color(step.label, statusColor(step.status));
+			const meta = step.status === "pending" ? "queued" : duration(step);
+			const detail = step.detail ? ` — ${step.detail}` : "";
+			return truncateToWidth(`${symbol} ${label} ${count} ${color(meta, ANSI.dim)}${color(detail, ANSI.dim)}`, safeWidth);
+		});
+	};
+	const activeStepText = () => {
+		const step = statuses[Math.max(0, Math.min(activeIndex, statuses.length - 1))];
+		return `${step.label} (${activeIndex + 1}/${statuses.length})`;
 	};
 	const detailLines = (width: number): string[] => {
 		const step = statuses[Math.max(0, Math.min(activeIndex, statuses.length - 1))];
@@ -465,7 +454,7 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		const title = step.status === "failed" ? " Failed step " : step.status === "running" ? " Active step " : " Step detail ";
 		const top = `┌${title}${"─".repeat(Math.max(0, inner - title.length))}┐`;
 		const body = [
-			`${statusIcon(step.status)} ${step.label}`,
+			`${statusIcon(step.status)} ${step.label} (${activeIndex + 1}/${statuses.length})`,
 			`${step.type} · ${step.status} · ${duration(step)}`,
 			activeText,
 			`summary: ${runDir}/SUMMARY.md`,
@@ -479,15 +468,16 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		if (!ctx.hasUI) return;
 		activeText = truncate(active, 220);
 		const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-		ctx.ui.setStatus("flow", `Flow ${progressBar()} • ${activeText}`);
+		ctx.ui.setStatus("flow", `Flow ${activeStepText()} • ${progressBar()} • ${activeText}`);
 		ctx.ui.setWidget("flow-progress", (_tui: any, _theme: any) => ({
 			render(width: number) {
 				const lines = [
-					`${color("Flow", ANSI.softGreen + ANSI.bold)} ${color(progressBar(), ANSI.reset)} ${color("•", ANSI.gray)} ${elapsed}s`,
+					`${color("Flow", ANSI.softGreen + ANSI.bold)} ${color(activeStepText(), ANSI.reset)} ${color("•", ANSI.gray)} ${color(progressBar(), ANSI.reset)} ${color("•", ANSI.gray)} ${elapsed}s`,
 					`${color("Flow:", ANSI.cyan)} ${flowPath}`,
 					`${color("Run:", ANSI.cyan)} ${runDir}`,
 					"",
-					...visualLines(width),
+					color("Checklist", ANSI.cyan),
+					...checklistLines(width),
 					"",
 					...detailLines(width),
 				];
