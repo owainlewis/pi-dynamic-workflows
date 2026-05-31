@@ -496,78 +496,65 @@ function summaryMarkdown(data: { flowPath: string; task: string; runId: string; 
 }
 
 function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowStep[], initialSteps?: StepSummary[]) {
-	const statuses = steps.map((step, index) => ({ label: step.label ?? step.name, type: step.type, status: initialSteps?.[index]?.status ?? "pending" as StepStatus, detail: initialSteps?.[index]?.detail ?? "", startedAt: 0, endedAt: initialSteps?.[index]?.status === "passed" || initialSteps?.[index]?.status === "failed" || initialSteps?.[index]?.status === "skipped" ? Date.now() : 0 }));
+	const statuses = steps.map((step, index) => ({
+		label: step.label ?? step.name,
+		type: step.type,
+		status: initialSteps?.[index]?.status ?? "pending" as StepStatus,
+		detail: initialSteps?.[index]?.detail ?? "",
+		startedAt: 0,
+		endedAt: initialSteps?.[index]?.status === "passed" || initialSteps?.[index]?.status === "failed" || initialSteps?.[index]?.status === "skipped" ? Date.now() : 0,
+	}));
 	const startedAt = Date.now();
 	let activeIndex = 0;
-	let activeText = "starting";
-	const statusIcon = (status: StepStatus) => status === "passed" ? "✓" : status === "failed" ? "✗" : status === "running" ? "▶" : status === "skipped" ? "↷" : "○";
+	let activeText = "Starting…";
+	let finalState: "running" | "passed" | "failed" = "running";
+	const icon = (status: StepStatus) => status === "passed" ? "✓" : status === "failed" ? "✕" : status === "running" ? "◉" : status === "skipped" ? "↷" : "○";
 	const duration = (step: typeof statuses[number]) => {
-		if (!step.startedAt) return "queued";
+		if (!step.startedAt) return "";
 		const end = step.endedAt || Date.now();
 		const seconds = Math.max(1, Math.round((end - step.startedAt) / 1000));
 		return `${seconds}s`;
 	};
-	const progressBar = () => {
-		const done = statuses.filter((step) => step.status === "passed" || step.status === "skipped").length;
-		const failed = statuses.some((step) => step.status === "failed");
-		const width = 18;
-		const filled = Math.round((done / Math.max(1, statuses.length)) * width);
-		return `${color("█".repeat(filled), failed ? ANSI.red : ANSI.green)}${color("░".repeat(width - filled), ANSI.gray)} ${done}/${statuses.length}`;
+	const completedCount = () => statuses.filter((step) => step.status === "passed" || step.status === "skipped").length;
+	const activeStep = () => statuses[Math.max(0, Math.min(activeIndex, statuses.length - 1))];
+	const activeStepText = () => `${activeStep().label} · ${activeIndex + 1}/${statuses.length}`;
+	const stepTone = (step: typeof statuses[number]) => step.status === "pending" ? ANSI.gray : statusColor(step.status);
+	const progressDots = () => statuses.map((step) => color(icon(step.status), stepTone(step))).join(" ");
+	const statusWord = () => finalState === "passed" ? "complete" : finalState === "failed" ? "failed" : "running";
+	const cleanDetail = (detail: string) => {
+		const trimmed = detail.replace(/\s+/g, " ").trim();
+		if (!trimmed) return "";
+		if (/^(sleep|mkdir|printf|test|git|npm|pnpm|yarn|bun|bash|python|node|echo|cat|rm|cp|mv)\b/.test(trimmed) || trimmed.includes("{{ .")) return "Running command…";
+		return truncate(trimmed, 120);
 	};
-	const plainCell = (text: string, width: number) => truncate(text, Math.max(1, width)).padEnd(width).slice(0, width);
-	const checklistLines = (width: number): string[] => {
-		const safeWidth = Math.max(40, width - 2);
-		const numberWidth = String(statuses.length).length;
-		return statuses.map((step, index) => {
-			const symbol = color(statusIcon(step.status), statusColor(step.status));
-			const count = color(`(${String(index + 1).padStart(numberWidth, " ")}/${statuses.length})`, ANSI.gray);
-			const label = color(step.label, statusColor(step.status));
-			const meta = step.status === "pending" ? "queued" : duration(step);
-			const detail = step.detail ? ` — ${step.detail}` : "";
-			return truncateToWidth(`${symbol} ${label} ${count} ${color(meta, ANSI.dim)}${color(detail, ANSI.dim)}`, safeWidth);
-		});
-	};
-	const activeStepText = () => {
-		const step = statuses[Math.max(0, Math.min(activeIndex, statuses.length - 1))];
-		return `${step.label} (${activeIndex + 1}/${statuses.length})`;
-	};
-	const detailLines = (width: number): string[] => {
-		const step = statuses[Math.max(0, Math.min(activeIndex, statuses.length - 1))];
-		const safeWidth = Math.max(40, width - 2);
-		const inner = safeWidth - 2;
-		const title = step.status === "failed" ? " Failed step " : step.status === "running" ? " Active step " : " Step detail ";
-		const top = `┌${title}${"─".repeat(Math.max(0, inner - title.length))}┐`;
-		const body = [
-			`${statusIcon(step.status)} ${step.label} (${activeIndex + 1}/${statuses.length})`,
-			`${step.type} · ${step.status} · ${duration(step)}`,
-			activeText,
-			`summary: ${runDir}/SUMMARY.md`,
-		];
-		const lines = [top];
-		for (const line of body) for (const wrapped of wrapTextWithAnsi(line, Math.max(20, inner))) lines.push(`│${plainCell(wrapped, inner)}│`);
-		lines.push(`└${"─".repeat(inner)}┘`);
-		return lines;
+	const lineForStep = (step: typeof statuses[number], width: number): string => {
+		const tone = stepTone(step);
+		const label = color(step.label, tone);
+		const time = duration(step);
+		const state = step.status === "pending" ? "" : step.status === "passed" ? time || "done" : step.status === "running" ? "running" : step.status;
+		const text = `${color(icon(step.status), tone)} ${label}${state ? color(`  ${state}`, ANSI.dim) : ""}`;
+		return truncateToWidth(` ${text}`, width);
 	};
 	const render = (active: string) => {
 		if (!ctx.hasUI) return;
-		activeText = truncate(active, 220);
+		activeText = cleanDetail(active) || activeText;
 		const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
-		ctx.ui.setStatus("flow", `Flow ${activeStepText()} • ${progressBar()} • ${activeText}`);
+		const header = `Flow ${statusWord()} · ${activeStepText()}`;
+		ctx.ui.setStatus("flow", finalState === "running" ? `${header} · ${completedCount()}/${statuses.length}` : `Flow ${statusWord()} · ${statuses.length} steps · ${elapsed}s`);
 		ctx.ui.setWidget("flow-progress", (_tui: any, _theme: any) => ({
 			render(width: number) {
+				const name = path.basename(flowPath).replace(/\.ya?ml$/i, "");
+				const footer = finalState === "running" ? "Saving run summary…" : finalState === "failed" ? `Resume: /flow resume ${runDir}` : `Summary: ${runDir}/SUMMARY.md`;
 				const lines = [
-					`${color("Flow", ANSI.softGreen + ANSI.bold)} ${color(activeStepText(), ANSI.reset)} ${color("•", ANSI.gray)} ${color(progressBar(), ANSI.reset)} ${color("•", ANSI.gray)} ${elapsed}s`,
-					`${color("Flow:", ANSI.cyan)} ${flowPath}`,
-					`${color("Run:", ANSI.cyan)} ${runDir}`,
+					`${color("Flow", ANSI.softGreen + ANSI.bold)} ${color(statusWord(), finalState === "failed" ? ANSI.red : finalState === "passed" ? ANSI.green : ANSI.cyan)} ${color("·", ANSI.gray)} ${name} ${color("·", ANSI.gray)} ${completedCount()}/${statuses.length}`,
+					` ${progressDots()}`,
 					"",
-					color("Checklist", ANSI.cyan),
-					...checklistLines(width),
+					...statuses.map((step) => lineForStep(step, width)),
 					"",
-					...detailLines(width),
+					` ${color(activeText, finalState === "failed" ? ANSI.red : ANSI.dim)}`,
+					` ${color(footer, ANSI.gray)}`,
 				];
-				const rendered: string[] = [];
-				for (const line of lines) rendered.push(truncateToWidth(` ${line}`, width));
-				return rendered;
+				return lines.map((line) => truncateToWidth(line, width));
 			},
 			invalidate() {},
 		}), { placement: "aboveEditor" });
@@ -576,23 +563,25 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		set(index: number, status: StepStatus, detail = "") {
 			activeIndex = index;
 			statuses[index].status = status;
-			statuses[index].detail = truncate(detail, 140);
+			statuses[index].detail = cleanDetail(detail);
 			if (status === "running") {
 				statuses[index].startedAt = Date.now();
 				statuses[index].endedAt = 0;
 			}
 			if (status === "passed" || status === "failed" || status === "skipped") statuses[index].endedAt = Date.now();
-			render(`${statuses[index].label}: ${detail || status}`);
+			const message = status === "passed" ? `Completed in ${duration(statuses[index])}` : status === "failed" ? (cleanDetail(detail) || "Step failed") : status === "skipped" ? "Skipped" : (cleanDetail(detail) || `${statuses[index].label}…`);
+			render(message);
 		},
 		detail(index: number, detail: string) {
 			activeIndex = index;
-			statuses[index].detail = truncate(detail, 140);
-			render(`${statuses[index].label}: ${detail}`);
+			statuses[index].detail = cleanDetail(detail);
+			render(statuses[index].detail || detail);
 		},
 		complete(status: "passed" | "failed", active: string) {
+			finalState = status;
 			const failedIndex = statuses.findIndex((step) => step.status === "failed");
 			activeIndex = failedIndex >= 0 ? failedIndex : Math.max(0, statuses.length - 1);
-			render(`${status === "passed" ? "complete" : "failed"}: ${active}`);
+			render(status === "passed" ? "Done" : cleanDetail(active) || "Workflow failed");
 			ctx.ui.setStatus("flow", status === "passed" ? "Flow complete" : "Flow failed");
 		},
 	};
@@ -637,7 +626,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 				steps[i].status = "running";
 				steps[i].detail = "checking condition";
 				ui.set(i, "running", "checking condition");
-				ui.detail(i, whenCommand);
+				ui.detail(i, "Checking condition…");
 				const whenResult = await runShell(whenCommand, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
 				if (whenResult.exitCode !== 0) {
 					steps[i].status = "skipped";
@@ -656,7 +645,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 
 			if (step.type === "command") {
 				const command = renderTemplate(step.run!, vars);
-				ui.detail(i, command);
+				ui.detail(i, "Running command…");
 				const result = await runShell(command, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
 				steps[i].log = summarizeCommandResult(command, result);
 				steps[i].durationMs = Date.now() - stepStartedAt;
