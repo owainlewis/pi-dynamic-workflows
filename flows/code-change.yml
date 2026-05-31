@@ -1,4 +1,4 @@
-description: Plan, implement, review, refine, and summarize a focused code change.
+description: Linear plan, build, test, refine, and optionally open a draft PR.
 steps:
   - name: plan
     label: Plan the change
@@ -13,14 +13,11 @@ steps:
     tools: read,bash,edit,write
     prompt: prompts/BUILD.md
 
-  - name: fix_until_green
-    label: Fix until checks pass
-    type: loop
-    tools: read,bash,edit,write
-    prompt: prompts/FIX.md
-    until: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
-    maxIterations: 4
-    freeze: "test/ tests/ spec/ specs/ __tests__/"
+  - name: test
+    label: Run checks
+    type: command
+    timeoutSeconds: 600
+    run: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
 
   - name: review
     label: Review implementation
@@ -36,13 +33,26 @@ steps:
     when: grep -q "ISSUE" "{{ .RunDir }}/REVIEW.md"
     prompt: prompts/REFINE.md
 
-  - name: reverify
+  - name: retest
     label: Re-run checks
     type: command
     timeoutSeconds: 600
-    run: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+    run: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
 
-  - name: summarize
+  - name: prepare_pr
+    label: Prepare PR notes
+    type: agent
+    tools: read,bash,write
+    prompt: prompts/PREPARE_PR.md
+    expect: PR_BODY.md
+
+  - name: open_pr
+    label: Open draft PR when allowed
+    type: command
+    timeoutSeconds: 180
+    run: test "${FLOW_ALLOW_PR:-}" = "1" || { echo "Set FLOW_ALLOW_PR=1 to push and open a draft PR" > "{{ .RunDir }}/PR_SKIPPED"; exit 0; }; branch=$(git branch --show-current) && test -n "$branch" && case "$branch" in main|master) echo "Refusing to open PR from $branch" >&2; exit 1 ;; esac && git diff --quiet && git diff --cached --quiet && git push -u origin "$branch" && gh pr create --draft --fill --body-file "{{ .RunDir }}/PR_BODY.md" > "{{ .RunDir }}/PR_URL"
+
+  - name: summary
     label: Write final summary
     type: agent
     tools: read,bash,write

@@ -1,0 +1,31 @@
+description: UI-only smoke test for the Flow progress panel.
+steps:
+  - name: plan
+    label: Plan
+    type: command
+    timeoutSeconds: 30
+    run: sleep 1 && mkdir -p "{{ .RunDir }}" && printf "# UI smoke plan\n" > "{{ .RunDir }}/PLAN.md"
+
+  - name: build
+    label: Build
+    type: command
+    timeoutSeconds: 30
+    run: sleep 1 && printf "# UI smoke build\n" > "{{ .RunDir }}/BUILD.md"
+
+  - name: test
+    label: Test
+    type: command
+    timeoutSeconds: 30
+    run: sleep 1 && printf "# UI smoke test\n" > "{{ .RunDir }}/TEST.md"
+
+  - name: refine
+    label: Refine
+    type: command
+    timeoutSeconds: 30
+    run: sleep 1 && printf "# UI smoke refine\n" > "{{ .RunDir }}/REFINE.md"
+
+  - name: summary
+    label: Summary
+    type: command
+    timeoutSeconds: 30
+    run: sleep 1 && printf "# UI smoke complete\n" > "{{ .RunDir }}/UI_SMOKE.md"

@@ -33,7 +33,7 @@ steps:
     tools: read,bash,edit,write
     timeoutSeconds: 1200
     prompt: prompts/GITHUB_ISSUE_FIX.md
-    until: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+    until: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
     maxIterations: 4
     freeze: "test/ tests/ spec/ specs/ __tests__/"
 
@@ -57,7 +57,7 @@ steps:
     label: Run final checks
     type: command
     timeoutSeconds: 600
-    run: if npm run | grep -q " test"; then npm test; elif test -f package.json; then npm exec -- tsc --noEmit; else git diff --check; fi
+    run: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
 
   - name: open_draft_pr
     label: Open draft PR when allowed

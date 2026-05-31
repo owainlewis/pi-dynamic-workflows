@@ -16,36 +16,21 @@ pi --no-session -e ./index.ts --mode json -p '/flows'
 
 Expected: bundled workflows are listed with description lines.
 
-## Bundled command-only sample flow, no model required
+## Bundled UI smoke flow, no model required
 
 This flow includes short pauses so you can see progress in the Pi UI.
 
 Run from this repository:
 
 ```bash
-pi --no-session -e ./index.ts --mode json -p '/flow flows/command-smoke.yml "command smoke"'
+pi --no-session -e ./index.ts --mode json -p '/flow flows/ui-smoke.yml "ui smoke"'
 ```
 
 Expected:
 
 - the command exits successfully
-- `.pi/flow/runs/<run-id>/COMMAND_SMOKE.md` exists
-- `.pi/flow/tmp/<run-id>/` was removed by the cleanup step
+- `.pi/flow/runs/<run-id>/UI_SMOKE.md` exists
 - `SUMMARY.md` records all steps as passed
-
-## Bundled end-to-end sample flow with an agent step
-
-Run from this repository:
-
-```bash
-pi --no-session -e ./index.ts --mode json -p '/flow flows/smoke-sample.yml "agent smoke"'
-```
-
-Expected:
-
-- the command exits successfully
-- `.pi/flow/tmp/<run-id>/` was removed by the cleanup step
-- `SUMMARY.md` records all steps as passed, including the agent step output
 
 ## GitHub issue demo flow
 

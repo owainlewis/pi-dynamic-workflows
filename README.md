@@ -32,7 +32,7 @@ Flow moves you from **prompting agents** to **building workflows**.
 Instead of hoping the agent remembers the process, you write the process down once:
 
 ```text
-Plan → Check plan exists → Build → Fix until green → Review → Refine when needed → Summarize
+Plan → Build → Test → Review → Refine when needed → Prepare PR → Open PR when allowed
 ```
 
 Then you can run it again and again.
@@ -164,19 +164,21 @@ Prompts and command strings support:
 
 ## Built-in example
 
-Flow includes `flows/code-change.yml`, a supervised coding workflow:
+Flow includes two main bundled workflows:
 
 ```text
-Plan the change → Implement change → Fix until checks pass → Review implementation → Refine only if review found issues → Write final summary
+flows/ui-smoke.yml     # command-only UI smoke test
+flows/code-change.yml  # plan → build → test → review → refine → prepare/open PR
 ```
 
 Run it with:
 
 ```text
+/flow flows/ui-smoke.yml "test the Flow UI"
 /flow flows/code-change.yml "Add input validation to the signup form"
 ```
 
-The example does **not** commit, push, or open PRs. It leaves the final decision to you.
+The code-change example does **not** commit. It only pushes and opens a draft PR if `FLOW_ALLOW_PR=1` is set, the current branch is not `main`/`master`, and the working tree is clean.
 
 ## Run summaries
 
