@@ -51,6 +51,7 @@ It adds slash commands:
 
 - `/flows`
 - `/flow <workflow.yml> <task>`
+- `/flow-new <request>`
 - `/flow-runs`
 - `/flow-status`
 
@@ -80,6 +81,7 @@ It says:
 - what order they run in
 - which steps are commands
 - which steps are agents
+- which steps run agents in parallel
 - which tools each agent may use
 
 ### 3. The run directory
@@ -171,6 +173,59 @@ A loop step is the safe form of "test, fix, test again". It runs the `until` com
 
 Flow requires `maxIterations` and `freeze` so workflows cannot express an unbounded or unfenced loop.
 
+### 7. Parallel steps
+
+A parallel step fans one nested agent out over a simple YAML list.
+
+```yaml
+- parallel: Review PRs
+  foreach:
+    - PR1
+    - PR2
+    - PR3
+  worktree: true
+  agent:
+    prompt: prompts/REVIEW_PR.md
+    tools: read,bash,write
+    expect: RESULT.md
+```
+
+Each child gets the normal workflow variables plus:
+
+```text
+{{ .Item }}
+{{ .ItemIndex }}
+{{ .ItemSlug }}
+{{ .ChildRunDir }}
+{{ .WorktreeDir }}
+{{ .BranchName }}
+```
+
+Child prompts should write artifacts to `{{ .ChildRunDir }}`. If `worktree: true`, Flow creates a separate git worktree and branch for each item, then records `PATCH.diff` and `STATUS.txt` in the child run directory.
+
+The next step is usually a normal agent that reads the child reports and combines the results.
+
+For readability, a workflow can name the item variable:
+
+```yaml
+- parallel: Review files
+  foreach:
+    var: File
+    in:
+      - README.md
+      - index.ts
+  agent:
+    prompt: prompts/REVIEW_FILE.md
+```
+
+That makes both `{{ .Item }}` and `{{ .File }}` available to the child prompt.
+
+### 8. Dynamic workflow authoring
+
+`/flow-new` is the authoring layer. You describe the process in plain language, and a Pi agent writes concrete workflow YAML plus prompt files under `.pi/workflows/`.
+
+Flow then validates the generated YAML with the same parser the runtime uses. The runtime stays deterministic; the agent is only used to author the workflow.
+
 ## What happens during a run
 
 Imagine this command:
@@ -189,10 +244,11 @@ Flow does this:
 6. If the step is `command`, runs shell code.
 7. If the step is `agent`, starts a nested Pi process with that step prompt and checks any `expect` artifact.
 8. If the step is `loop`, repeats a guarded agent body until its deterministic gate passes.
-9. Records compact step output in memory.
-10. Marks the step passed, failed, or skipped.
-11. Moves to the next step.
-12. Writes one `SUMMARY.md` file.
+9. If the step is `parallel`, starts one child agent per `foreach` item and waits for all children to finish.
+10. Records compact step output in memory.
+11. Marks the step passed, failed, or skipped.
+12. Moves to the next step.
+13. Writes one `SUMMARY.md` file.
 
 ## How state is handled
 

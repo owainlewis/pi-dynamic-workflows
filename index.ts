@@ -9,7 +9,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 type StepStatus = "pending" | "running" | "passed" | "failed" | "skipped";
-type StepType = "agent" | "command" | "loop";
+type StepType = "agent" | "command" | "loop" | "parallel";
+
+interface ParallelAgent {
+	prompt?: string;
+	tools?: string;
+	expect?: string;
+	timeoutSeconds?: number;
+}
 
 interface FlowStep {
 	name: string;
@@ -23,6 +30,10 @@ interface FlowStep {
 	until?: string;
 	maxIterations?: number;
 	freeze?: string;
+	foreach?: string[];
+	foreachVar?: string;
+	worktree?: boolean;
+	agent?: ParallelAgent;
 	timeoutSeconds?: number;
 }
 
@@ -34,12 +45,20 @@ interface FlowDefinition {
 }
 
 interface FlowVars {
+	[key: string]: string | undefined;
 	Task: string;
 	RunID: string;
 	RunDir: string;
 	CWD: string;
 	FlowPath: string;
 	StepName: string;
+	ParentStepName?: string;
+	Item?: string;
+	ItemIndex?: string;
+	ItemSlug?: string;
+	ChildRunDir?: string;
+	WorktreeDir?: string;
+	BranchName?: string;
 }
 
 interface StepSummary {
@@ -126,6 +145,20 @@ function relativeForPrompt(cwd: string, filePath: string): string {
 	return relative.startsWith("..") ? filePath : relative;
 }
 
+function displayFlowPath(cwd: string, filePath: string): string {
+	const extensionRelative = path.relative(EXTENSION_DIR, filePath);
+	if (extensionRelative && !extensionRelative.startsWith("..") && !path.isAbsolute(extensionRelative)) return extensionRelative;
+	return relativeForPrompt(cwd, filePath);
+}
+
+function resolveFlowPath(cwd: string, flowPath: string): string {
+	const cwdPath = path.resolve(cwd, flowPath);
+	if (fs.existsSync(cwdPath)) return cwdPath;
+	const extensionPath = path.resolve(EXTENSION_DIR, flowPath);
+	if (fs.existsSync(extensionPath)) return extensionPath;
+	return cwdPath;
+}
+
 function runId(): string {
 	return `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -187,6 +220,8 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 	let workflowName: string | undefined;
 	let description: string | undefined;
 	let inSteps = false;
+	let inForeach = false;
+	let inParallelAgent = false;
 
 	const finish = () => {
 		if (!current) return;
@@ -195,7 +230,7 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 		if (!/^[A-Za-z0-9_-]+$/.test(current.name)) throw new Error(`${flowPath}: invalid step name: ${current.name}`);
 		if (seen.has(current.name)) throw new Error(`${flowPath}: duplicate step name: ${current.name}`);
 		seen.add(current.name);
-		if (current.type !== "agent" && current.type !== "command" && current.type !== "loop") throw new Error(`${flowPath}: step ${current.name} must have type agent, command, or loop`);
+		if (current.type !== "agent" && current.type !== "command" && current.type !== "loop" && current.type !== "parallel") throw new Error(`${flowPath}: step ${current.name} must have type agent, command, loop, or parallel`);
 		if (current.type === "agent" && !current.prompt) throw new Error(`${flowPath}: agent step ${current.name} is missing prompt`);
 		if (current.type === "command" && !current.run) throw new Error(`${flowPath}: command step ${current.name} is missing run`);
 		if (current.type === "loop") {
@@ -203,6 +238,11 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 			if (!current.until) throw new Error(`${flowPath}: loop step ${current.name} is missing until`);
 			if (!current.maxIterations || !Number.isFinite(current.maxIterations) || current.maxIterations <= 0) throw new Error(`${flowPath}: loop step ${current.name} maxIterations must be positive`);
 			if (!current.freeze?.trim()) throw new Error(`${flowPath}: loop step ${current.name} is missing freeze`);
+		}
+		if (current.type === "parallel") {
+			if (!current.foreach?.length) throw new Error(`${flowPath}: parallel step ${current.name} is missing foreach items`);
+			if (!current.agent?.prompt) throw new Error(`${flowPath}: parallel step ${current.name} is missing agent.prompt`);
+			if (current.agent.timeoutSeconds !== undefined && (!Number.isFinite(current.agent.timeoutSeconds) || current.agent.timeoutSeconds <= 0)) throw new Error(`${flowPath}: parallel step ${current.name} agent.timeoutSeconds must be positive`);
 		}
 		if (current.timeoutSeconds !== undefined && (!Number.isFinite(current.timeoutSeconds) || current.timeoutSeconds <= 0)) throw new Error(`${flowPath}: step ${current.name} timeoutSeconds must be positive`);
 		steps.push(current as FlowStep);
@@ -227,19 +267,63 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 			description = unquoteYamlValue(descriptionMatch[1]);
 			continue;
 		}
-		const stepStart = line.match(/^\s*-\s+(agent|command|loop)\s*:\s*(.+?)\s*$/);
+		const stepStart = line.match(/^\s*-\s+(agent|command|loop|parallel)\s*:\s*(.+?)\s*$/);
 		if (stepStart) {
 			finish();
+			inForeach = false;
+			inParallelAgent = false;
 			const label = unquoteYamlValue(stepStart[2]);
 			current = { type: stepStart[1] as StepType, label, name: slugifyName(label) };
 			continue;
 		}
-		const prop = line.match(/^\s+(id|label|prompt|run|tools|when|expect|until|maxIterations|freeze|timeoutSeconds)\s*:\s*(.+?)\s*$/);
+		if (inForeach) {
+			const item = line.match(/^\s+-\s+(.+?)\s*$/);
+			if (item) {
+				current?.foreach?.push(unquoteYamlValue(item[1]));
+				continue;
+			}
+			const foreachVar = line.match(/^\s+var\s*:\s*(.+?)\s*$/);
+			if (foreachVar) {
+				const value = unquoteYamlValue(foreachVar[1]);
+				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error(`${flowPath}: foreach var must be a template-safe identifier`);
+				current!.foreachVar = value;
+				continue;
+			}
+			if (/^\s+(in|items)\s*:\s*$/.test(line)) continue;
+			inForeach = false;
+		}
+		if (inParallelAgent) {
+			const agentProp = line.match(/^\s+(prompt|tools|expect|timeoutSeconds)\s*:\s*(.+?)\s*$/);
+			if (agentProp) {
+				if (!current?.agent) current!.agent = {};
+				const key = agentProp[1];
+				const value = unquoteYamlValue(agentProp[2]);
+				(current!.agent as any)[key] = key === "timeoutSeconds" ? Number.parseInt(value, 10) : value;
+				continue;
+			}
+			inParallelAgent = false;
+		}
+		if (/^\s+foreach\s*:\s*$/.test(line)) {
+			if (!current || current.type !== "parallel") throw new Error(`${flowPath}: foreach is only supported on parallel steps`);
+			current.foreach = [];
+			inForeach = true;
+			inParallelAgent = false;
+			continue;
+		}
+		if (/^\s+agent\s*:\s*$/.test(line)) {
+			if (!current || current.type !== "parallel") throw new Error(`${flowPath}: nested agent is only supported on parallel steps`);
+			current.agent = {};
+			inForeach = false;
+			inParallelAgent = true;
+			continue;
+		}
+		const prop = line.match(/^\s+(id|label|prompt|run|tools|when|expect|until|maxIterations|freeze|worktree|timeoutSeconds)\s*:\s*(.+?)\s*$/);
 		if (!prop) throw new Error(`${flowPath}: unsupported or malformed line: ${rawLine.trim()}`);
 		if (!current) current = {};
 		const key = prop[1];
 		const value = unquoteYamlValue(prop[2]);
 		if (key === "id") current.name = slugifyName(value);
+		else if (key === "worktree") current.worktree = value === "true";
 		else (current as any)[key] = key === "timeoutSeconds" || key === "maxIterations" ? Number.parseInt(value, 10) : value;
 	}
 	finish();
@@ -252,6 +336,29 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 
 function renderTemplate(input: string, vars: FlowVars): string {
 	return input.replace(/{{\s*\.([A-Za-z0-9_]+)\s*}}/g, (_match, key) => String((vars as any)[key] ?? ""));
+}
+
+function uniqueSlug(base: string, used: Set<string>): string {
+	const fallback = base || "item";
+	let slug = fallback;
+	let suffix = 2;
+	while (used.has(slug)) slug = `${fallback}-${suffix++}`;
+	used.add(slug);
+	return slug;
+}
+
+function childVars(parent: FlowVars, item: string, itemIndex: number, itemSlug: string, childRunDir: string, worktreeDir?: string, branchName?: string): FlowVars {
+	return {
+		...parent,
+		RunDir: path.resolve(parent.CWD, parent.RunDir),
+		ParentStepName: parent.StepName,
+		Item: item,
+		ItemIndex: String(itemIndex),
+		ItemSlug: itemSlug,
+		ChildRunDir: childRunDir,
+		WorktreeDir: worktreeDir,
+		BranchName: branchName,
+	};
 }
 
 function terminateProcess(proc: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
@@ -468,7 +575,7 @@ function parseSummaryMarkdown(text: string, runDirFallback: string): FlowRunStat
 			status: field("status") as StepStatus,
 			detail: field("detail") === "n/a" ? "" : field("detail"),
 		} satisfies StepSummary;
-	}).filter((step) => step.name && (step.type === "agent" || step.type === "command" || step.type === "loop"));
+	}).filter((step) => step.name && (step.type === "agent" || step.type === "command" || step.type === "loop" || step.type === "parallel"));
 	const flowPath = value("flow");
 	if (!flowPath || !task || !steps.length) throw new Error("Run is missing STATE.json and SUMMARY.md could not be parsed for resume metadata");
 	return {
@@ -514,6 +621,94 @@ async function gitSnapshot(cwd: string, signal?: AbortSignal): Promise<{ branch?
 		branch: branch?.exitCode === 0 ? branch.stdout.trim() || undefined : undefined,
 		commit: commit?.exitCode === 0 ? commit.stdout.trim() || undefined : undefined,
 	};
+}
+
+async function createChildWorktree(options: { cwd: string; runId: string; stepName: string; itemSlug: string; childRunDir: string; timeoutSeconds: number; signal?: AbortSignal }): Promise<{ worktreeDir: string; branchName: string; log: string }> {
+	const worktreeDir = path.join(options.childRunDir, "worktree");
+	const branchName = `flow/${options.runId}/${options.stepName}/${options.itemSlug}`;
+	await mkdir(options.childRunDir, { recursive: true });
+	const command = `git worktree add -b ${shellQuote(branchName)} ${shellQuote(worktreeDir)} HEAD`;
+	const result = await runShell(command, options.cwd, options.timeoutSeconds, options.signal);
+	if (result.exitCode !== 0) throw new Error(`Could not create child worktree ${branchName}:\n${result.stderr || result.stdout}`.trim());
+	return { worktreeDir, branchName, log: summarizeCommandResult(command, result) };
+}
+
+async function captureChildWorktree(childRunDir: string, worktreeDir: string, timeoutSeconds: number, signal?: AbortSignal): Promise<string> {
+	const diff = await runShell(`git diff --binary > ${shellQuote(path.join(childRunDir, "PATCH.diff"))}`, worktreeDir, timeoutSeconds, signal);
+	const status = await runShell(`git status --porcelain=v1 --branch > ${shellQuote(path.join(childRunDir, "STATUS.txt"))}`, worktreeDir, timeoutSeconds, signal);
+	if (diff.exitCode !== 0) throw new Error(`Could not capture child diff:\n${diff.stderr || diff.stdout}`.trim());
+	if (status.exitCode !== 0) throw new Error(`Could not capture child status:\n${status.stderr || status.stdout}`.trim());
+	return [`capture diff\n${summarizeCommandResult("git diff --binary", diff)}`, `capture status\n${summarizeCommandResult("git status --porcelain=v1 --branch", status)}`].join("\n\n");
+}
+
+async function runParallelStep(options: {
+	step: FlowStep;
+	parentVars: FlowVars;
+	absoluteFlowPath: string;
+	absoluteRunDir: string;
+	cwd: string;
+	runId: string;
+	signal?: AbortSignal;
+	onProgress?: (message: string) => void;
+}): Promise<{ detail: string; log: string }> {
+	const step = options.step;
+	const promptPath = path.resolve(path.dirname(options.absoluteFlowPath), step.agent!.prompt!);
+	const promptTemplate = await readFile(promptPath, "utf8");
+	const tools = step.agent!.tools?.split(",").map((tool) => tool.trim()).filter(Boolean);
+	const timeoutSeconds = step.agent!.timeoutSeconds ?? step.timeoutSeconds ?? parsePositiveInt(process.env.FLOW_AGENT_TIMEOUT_SECONDS, DEFAULT_AGENT_TIMEOUT_SECONDS);
+	const usedSlugs = new Set<string>();
+	const children = step.foreach!.map((item, itemIndex) => {
+		const itemSlug = uniqueSlug(slugifyName(item), usedSlugs);
+		const childRunDir = path.join(options.absoluteRunDir, step.name, itemSlug);
+		return { item, itemIndex, itemSlug, childRunDir };
+	});
+
+	const results = await Promise.allSettled(children.map(async (child) => {
+		await mkdir(child.childRunDir, { recursive: true });
+		const logs: string[] = [`item: ${child.item}`, `childRunDir: ${child.childRunDir}`];
+		let cwd = options.cwd;
+		let worktreeDir: string | undefined;
+		let branchName: string | undefined;
+		if (step.worktree) {
+			const worktree = await createChildWorktree({ cwd: options.cwd, runId: options.runId, stepName: step.name, itemSlug: child.itemSlug, childRunDir: child.childRunDir, timeoutSeconds: DEFAULT_COMMAND_TIMEOUT_SECONDS, signal: options.signal });
+			worktreeDir = worktree.worktreeDir;
+			branchName = worktree.branchName;
+			cwd = worktreeDir;
+			logs.push(`branch: ${branchName}`, "", worktree.log);
+		}
+		const vars = childVars(options.parentVars, child.item, child.itemIndex, child.itemSlug, child.childRunDir, worktreeDir, branchName);
+		if (step.foreachVar) vars[step.foreachVar] = child.item;
+		const prompt = renderTemplate(promptTemplate, vars);
+		options.onProgress?.(`child ${child.itemIndex + 1}/${children.length}: ${child.item}`);
+		const output = await runAgent({
+			cwd,
+			prompt,
+			tools,
+			timeoutSeconds,
+			signal: options.signal,
+			onProgress: (message) => options.onProgress?.(`child ${child.itemIndex + 1}/${children.length}: ${message}`),
+		});
+		await writeArtifact(child.childRunDir, "OUTPUT.md", output.trim() || "Agent completed without a final text response.");
+		if (step.agent!.expect) assertExpectedArtifact(child.childRunDir, renderTemplate(step.agent!.expect, vars));
+		if (worktreeDir) logs.push("", await captureChildWorktree(child.childRunDir, worktreeDir, DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal));
+		return { child, output, log: logs.join("\n") };
+	}));
+
+	const failures = results
+		.map((result, index) => ({ result, child: children[index] }))
+		.filter((entry): entry is { result: PromiseRejectedResult; child: typeof children[number] } => entry.result.status === "rejected");
+	const log = results.map((result, index) => {
+		const child = children[index];
+		if (result.status === "fulfilled") return `### ${child.item}\n\n${result.value.log}\n\n${summarizeAgentOutput(result.value.output)}`;
+		const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+		return `### ${child.item} FAILED\n\n${message}`;
+	}).join("\n\n---\n\n").slice(0, 8_000);
+
+	if (failures.length) {
+		const failedItems = failures.map((failure) => failure.child.item).join(", ");
+		throw new Error(`Parallel step failed for ${failures.length}/${children.length} item${failures.length === 1 ? "" : "s"}: ${failedItems}\n${log}`.trim());
+	}
+	return { detail: `completed ${children.length} parallel child${children.length === 1 ? "" : "ren"}`, log };
 }
 
 function summaryMarkdown(data: { flowName: string; flowId: string; flowPath: string; task: string; runId: string; runDir: string; startedAt: string; endedAt: string; status: "passed" | "failed"; steps: StepSummary[] }): string {
@@ -628,8 +823,8 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 }
 
 async function runFlow(options: { cwd: string; flowPath: string; task: string; signal?: AbortSignal; ctx: any; resume?: { runDir: string; runId: string; startedAt: string; steps: StepSummary[]; startAtIndex: number; expectedFlowHash?: string } }): Promise<string> {
-	const absoluteFlowPath = path.resolve(options.cwd, options.flowPath);
-	const relativeFlowPath = relativeForPrompt(options.cwd, absoluteFlowPath);
+	const absoluteFlowPath = resolveFlowPath(options.cwd, options.flowPath);
+	const relativeFlowPath = displayFlowPath(options.cwd, absoluteFlowPath);
 	const flowText = await readFile(absoluteFlowPath, "utf8");
 	const flowHash = hashText(flowText);
 	if (options.resume?.expectedFlowHash && options.resume.expectedFlowHash !== flowHash) throw new Error(`Workflow file changed since prior run: ${relativeFlowPath}`);
@@ -700,7 +895,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 				steps[i].log = summarizeAgentOutput(output);
 				steps[i].durationMs = Date.now() - stepStartedAt;
 				steps[i].detail = step.expect ? `agent completed; found ${step.expect}` : "agent completed";
-			} else {
+			} else if (step.type === "loop") {
 				const until = renderTemplate(step.until!, vars);
 				const maxIterations = step.maxIterations!;
 				let gate = await runShell(until, options.cwd, step.timeoutSeconds ?? DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal);
@@ -736,6 +931,20 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 				}
 				steps[i].log = logs.join("\n\n---\n\n").slice(0, 4_000);
 				steps[i].durationMs = Date.now() - stepStartedAt;
+			} else {
+				const result = await runParallelStep({
+					step,
+					parentVars: vars,
+					absoluteFlowPath,
+					absoluteRunDir,
+					cwd: options.cwd,
+					runId: id,
+					signal: options.signal,
+					onProgress: (message) => ui.detail(i, message),
+				});
+				steps[i].log = result.log;
+				steps[i].durationMs = Date.now() - stepStartedAt;
+				steps[i].detail = result.detail;
 			}
 
 			steps[i].status = "passed";
@@ -781,7 +990,7 @@ function discoverFlowFiles(cwd: string): Array<{ label: string; id?: string; fil
 			const absolute = path.join(candidate.dir, entry.name);
 			if (seen.has(absolute)) continue;
 			seen.add(absolute);
-			const file = relativeForPrompt(cwd, absolute);
+			const file = displayFlowPath(cwd, absolute);
 			let label = entry.name.replace(/\.ya?ml$/i, "");
 			let id: string | undefined;
 			let description: string | undefined;
@@ -808,6 +1017,105 @@ function listRunDirs(cwd: string, limit = 10): string[] {
 		.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
 		.slice(0, limit)
 		.map((runDir) => relativeForPrompt(cwd, runDir));
+}
+
+function listProjectWorkflowFiles(cwd: string): string[] {
+	const root = path.join(cwd, ".pi", "workflows");
+	if (!fs.existsSync(root)) return [];
+	const files: string[] = [];
+	const visit = (dir: string) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const absolute = path.join(dir, entry.name);
+			if (entry.isDirectory()) visit(absolute);
+			else if (/\.ya?ml$/i.test(entry.name)) files.push(absolute);
+		}
+	};
+	visit(root);
+	return files.sort();
+}
+
+function validateWorkflowFiles(cwd: string, files: string[]): string[] {
+	const errors: string[] = [];
+	for (const file of files) {
+		try {
+			parseFlowYaml(fs.readFileSync(file, "utf8"), relativeForPrompt(cwd, file));
+		} catch (error) {
+			errors.push(`${relativeForPrompt(cwd, file)}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return errors;
+}
+
+function workflowAuthorPrompt(request: string): string {
+	return `You are creating a Flow workflow for this project.
+
+User request:
+
+${request}
+
+Create one concrete workflow and any prompt files it needs.
+
+Write files under:
+
+- .pi/workflows/<workflow-slug>.yml
+- .pi/workflows/prompts/<workflow-slug>/*.md
+
+Use this Flow schema:
+
+\`\`\`yaml
+name: Human Workflow Name
+description: One-line summary.
+steps:
+  - agent: Step name
+    prompt: prompts/<workflow-slug>/STEP.md
+    tools: read,bash,write
+    expect: RESULT.md
+
+  - command: Check something
+    run: test -s "{{ .RunDir }}/RESULT.md"
+
+  - parallel: Review several things
+    foreach:
+      - item-one
+      - item-two
+    worktree: false
+    agent:
+      prompt: prompts/<workflow-slug>/REVIEW.md
+      tools: read,bash,write
+      expect: RESULT.md
+
+  - agent: Combine results
+    prompt: prompts/<workflow-slug>/COMBINE.md
+\`\`\`
+
+Runtime rules:
+
+- Top-level \`name\` is required.
+- Each step starts with exactly one of \`agent:\`, \`command:\`, \`loop:\`, or \`parallel:\`.
+- Agent and loop prompt paths are relative to the workflow file.
+- Prefer \`foreach:\` as a simple YAML list of scalar items.
+- If a named item variable helps readability, use \`foreach: { var/in }\` style:
+
+\`\`\`yaml
+foreach:
+  var: File
+  in:
+    - README.md
+    - index.ts
+\`\`\`
+
+- A parallel step has one nested \`agent:\` body.
+- Parallel children get \`{{ .Item }}\`, \`{{ .ItemIndex }}\`, \`{{ .ItemSlug }}\`, \`{{ .ChildRunDir }}\`, any named foreach variable such as \`{{ .File }}\`, and, when \`worktree: true\`, \`{{ .WorktreeDir }}\` and \`{{ .BranchName }}\`.
+- Parallel child prompts should write outputs under \`{{ .ChildRunDir }}\`.
+- If \`worktree: true\`, code edits happen in the child worktree; Flow records \`PATCH.diff\` and \`STATUS.txt\` under the child run dir.
+- Keep examples safe by default: no commits, pushes, destructive deletes, or network-dependent behavior unless the user explicitly requested them.
+- Prefer deterministic command gates where useful.
+
+After writing the files, reply with:
+
+- workflow file path
+- prompt files created
+- exact /flow command to run it`;
 }
 
 export default function flowExtension(pi: ExtensionAPI): void {
@@ -882,12 +1190,50 @@ export default function flowExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("flow-new", {
+		description: "Generate a new Flow workflow and prompts from a plain-language request",
+		handler: async (args, ctx) => {
+			const request = args.trim();
+			if (!request) {
+				ctx.ui.notify('Usage: /flow-new "Create a workflow that ..."', "error");
+				return;
+			}
+			try {
+				const before = new Map(listProjectWorkflowFiles(ctx.cwd).map((file) => [file, fs.statSync(file).mtimeMs]));
+				const output = await runAgent({
+					cwd: ctx.cwd,
+					prompt: workflowAuthorPrompt(request),
+					tools: ["read", "bash", "edit", "write"],
+					timeoutSeconds: parsePositiveInt(process.env.FLOW_AGENT_TIMEOUT_SECONDS, DEFAULT_AGENT_TIMEOUT_SECONDS),
+					signal: ctx.signal,
+					onProgress: (message) => ctx.ui.setStatus("flow", `Authoring workflow: ${truncate(message, 80)}`),
+				});
+				const workflowFiles = listProjectWorkflowFiles(ctx.cwd);
+				const changed = workflowFiles.filter((file) => !before.has(file) || before.get(file) !== fs.statSync(file).mtimeMs);
+				const errors = validateWorkflowFiles(ctx.cwd, changed.length ? changed : workflowFiles);
+				const createdList = changed.length ? changed.map((file) => `- \`${relativeForPrompt(ctx.cwd, file)}\``).join("\n") : "No workflow YAML files were created or changed.";
+				const validation = errors.length ? `\n\n## Validation Errors\n\n${errors.map((error) => `- ${error}`).join("\n")}` : "\n\nValidation passed.";
+				pi.sendMessage({
+					customType: "flow-new",
+					content: `# Flow Workflow Generated\n\n## Changed Workflows\n\n${createdList}${validation}\n\n## Author Output\n\n${output.trim() || "The authoring agent completed without a final text response."}`,
+					display: true,
+				}, { triggerTurn: false });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Flow authoring failed: ${message}`, "error");
+				pi.sendMessage({ customType: "flow-new-error", content: `# Flow Authoring Error\n\n${message}`, display: true }, { triggerTurn: false });
+			} finally {
+				setFlowReadyUi(ctx);
+			}
+		},
+	});
+
 	pi.registerCommand("flow-status", {
 		description: "Show Flow help",
 		handler: async (_args, ctx) => {
 			pi.sendMessage({
 				customType: "flow-status",
-				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands, nested Pi agents, or guarded loops.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow resume <run-dir>` — continue a failed run.\n- `/flow rerun <run-dir>` — start over with the same workflow and task.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
+				content: "# Flow\n\nFlow runs declarative YAML workflows in Pi. Steps can be deterministic shell commands, nested Pi agents, guarded loops, or parallel agent fan-out steps.\n\n## Commands\n\n- `/flows` — list available workflows.\n- `/flow <flow.yml> <task>` — run a workflow.\n- `/flow resume <run-dir>` — continue a failed run.\n- `/flow rerun <run-dir>` — start over with the same workflow and task.\n- `/flow-new \"Create a workflow that ...\"` — generate workflow YAML and prompts from a plain-language request.\n- `/flow-runs` — list recent run summaries.\n\n## Project workflows\n\nPut YAML files in `.pi/workflows/`. Run summaries are written to `.pi/flow/runs/<run-id>/SUMMARY.md`.",
 				display: true,
 			}, { triggerTurn: false });
 		},
