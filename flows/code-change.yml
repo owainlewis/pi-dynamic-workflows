@@ -1,59 +1,42 @@
+name: Code Change
 description: Linear plan, build, test, refine, and optionally open a draft PR.
 steps:
-  - name: plan
-    label: Plan the change
-    type: agent
+  - agent: Plan the change
     tools: read,bash,write
     prompt: prompts/PLAN.md
     expect: PLAN.md
 
-  - name: build
-    label: Implement change
-    type: agent
+  - agent: Implement change
     tools: read,bash,edit,write
     prompt: prompts/BUILD.md
 
-  - name: test
-    label: Run checks
-    type: command
+  - command: Run checks
     timeoutSeconds: 600
     run: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
 
-  - name: review
-    label: Review implementation
-    type: agent
+  - agent: Review implementation
     tools: read,bash,write
     prompt: prompts/REVIEW.md
     expect: REVIEW.md
 
-  - name: refine
-    label: Refine implementation
-    type: agent
+  - agent: Refine implementation
     tools: read,bash,edit,write
     when: grep -q "ISSUE" "{{ .RunDir }}/REVIEW.md"
     prompt: prompts/REFINE.md
 
-  - name: retest
-    label: Re-run checks
-    type: command
+  - command: Re-run checks
     timeoutSeconds: 600
     run: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
 
-  - name: prepare_pr
-    label: Prepare PR notes
-    type: agent
+  - agent: Prepare PR notes
     tools: read,bash,write
     prompt: prompts/PREPARE_PR.md
     expect: PR_BODY.md
 
-  - name: open_pr
-    label: Open draft PR when allowed
-    type: command
+  - command: Open draft PR when allowed
     timeoutSeconds: 180
     run: test "${FLOW_ALLOW_PR:-}" = "1" || { echo "Set FLOW_ALLOW_PR=1 to push and open a draft PR" > "{{ .RunDir }}/PR_SKIPPED"; exit 0; }; branch=$(git branch --show-current) && test -n "$branch" && case "$branch" in main|master) echo "Refusing to open PR from $branch" >&2; exit 1 ;; esac && git diff --quiet && git diff --cached --quiet && git push -u origin "$branch" && gh pr create --draft --fill --body-file "{{ .RunDir }}/PR_BODY.md" > "{{ .RunDir }}/PR_URL"
 
-  - name: summary
-    label: Write final summary
-    type: agent
+  - agent: Write final summary
     tools: read,bash,write
     prompt: prompts/SUMMARY.md

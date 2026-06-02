@@ -63,15 +63,12 @@ git init -q
 
 mkdir -p .pi/workflows
 cat > .pi/workflows/smoke.yaml <<'YAML'
+name: Smoke
 steps:
-  - name: make_plan
-    label: Make smoke plan
-    type: command
+  - command: Make smoke plan
     run: mkdir -p "{{ .RunDir }}" && echo "# Smoke plan" > "{{ .RunDir }}/PLAN.md"
 
-  - name: check_plan
-    label: Check plan
-    type: command
+  - command: Check plan
     run: test -s "{{ .RunDir }}/PLAN.md"
 YAML
 
@@ -89,30 +86,28 @@ Expected:
 Use a disposable git repo and a workflow where `when` skips one command and `loop.until` passes before the agent body or prompt file is used.
 
 ```yaml
+name: Conditional smoke
 steps:
-  - name: skipped
-    type: command
+  - command: Skipped
     when: test -s missing-file
     run: exit 1
 
-  - name: already_green
-    type: loop
+  - loop: Already green
     prompt: prompts/FIX.md
     until: test 1 = 1
     maxIterations: 1
     freeze: "test/"
 ```
 
-Expected: `SUMMARY.md` records `skipped` as skipped and `already_green` as passed.
+Expected: `SUMMARY.md` records `skipped` as skipped and `already-green` as passed.
 
 ## Failure path
 
 ```bash
 cat > .pi/workflows/fail.yaml <<'YAML'
+name: Failure smoke
 steps:
-  - name: check_plan
-    label: Check missing plan
-    type: command
+  - command: Check missing plan
     run: test -s "{{ .RunDir }}/PLAN.md" || { echo "Missing plan artifact" >&2; exit 1; }
 YAML
 

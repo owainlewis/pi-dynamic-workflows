@@ -1,31 +1,22 @@
+name: GitHub Issue Demo Cleanup
 description: Clean up local and optional remote artifacts from the GitHub issue demo workflow.
 steps:
-  - name: preflight
-    label: Check cleanup target
-    type: command
+  - command: Check cleanup target
     timeoutSeconds: 60
     run: test -n "{{ .Task }}" && test -s "{{ .Task }}/BRANCH" && branch=$(cat "{{ .Task }}/BRANCH") && case "$branch" in flow-demo/*) exit 0 ;; *) echo "Refusing to clean non-demo branch: $branch" >&2; exit 1 ;; esac
 
-  - name: close_pr
-    label: Close draft PR when allowed
-    type: command
+  - command: Close draft PR when allowed
     timeoutSeconds: 120
     run: test "${FLOW_DEMO_ALLOW_PUSH:-}" = "1" || { echo "Set FLOW_DEMO_ALLOW_PUSH=1 to close remote PRs"; exit 0; }; if test -s "{{ .Task }}/PR_URL"; then gh pr close "$(cat "{{ .Task }}/PR_URL")" --delete-branch || true; fi
 
-  - name: checkout_base
-    label: Return to base branch
-    type: command
+  - command: Return to base branch
     timeoutSeconds: 60
     run: base=$(cat "{{ .Task }}/BASE_BRANCH" 2>/dev/null || git symbolic-ref refs/remotes/origin/HEAD --short | sed 's|origin/||') && git switch "$base"
 
-  - name: delete_local_branch
-    label: Delete local demo branch
-    type: command
+  - command: Delete local demo branch
     timeoutSeconds: 60
     run: branch=$(cat "{{ .Task }}/BRANCH") && case "$branch" in flow-demo/*) git branch -D "$branch" || true ;; *) echo "Refusing to delete non-demo branch: $branch" >&2; exit 1 ;; esac
 
-  - name: cleanup_note
-    label: Write cleanup note
-    type: command
+  - command: Write cleanup note
     timeoutSeconds: 30
     run: printf "# Demo cleanup complete\n\nCleaned branch from %s\n" "{{ .Task }}" > "{{ .RunDir }}/CLEANUP.md"

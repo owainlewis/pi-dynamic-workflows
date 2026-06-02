@@ -104,23 +104,18 @@ Then run one with:
 ## Workflow format
 
 ```yaml
+name: Code Change
 description: Plan, build, and check a small code change.
 steps:
-  - name: plan
-    label: Plan the change
-    type: agent
+  - agent: Plan the change
     tools: read,bash,write
     prompt: prompts/PLAN.md
 
-  - name: check_plan
-    label: Validate plan artifact
-    type: command
+  - command: Validate plan artifact
     timeoutSeconds: 30
     run: test -s "{{ .RunDir }}/PLAN.md"
 
-  - name: build
-    label: Implement change
-    type: agent
+  - agent: Implement change
     tools: read,bash,edit,write
     prompt: prompts/BUILD.md
 ```
@@ -129,6 +124,7 @@ Top-level workflow fields:
 
 | Field | Required | Description |
 | --- | --- | --- |
+| `name` | yes | Human-friendly workflow name. Flow slugifies this into the workflow id. |
 | `description` | no | Single-line summary shown by `/flows`. |
 | `steps` | yes | Ordered workflow steps. |
 
@@ -136,9 +132,9 @@ Supported step fields:
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `name` | yes | Stable step id. Use letters, numbers, `_`, or `-`. |
-| `type` | yes | `agent`, `command`, or `loop`. |
-| `label` | no | Human-friendly UI label. |
+| `agent` / `command` / `loop` | yes | Starts a step and provides the human-friendly step name. Flow slugifies this into the step id. |
+| `id` | no | Explicit stable step id. Useful if you want to rename a step without changing resume references. |
+| `label` | no | Optional UI label override. |
 | `prompt` | agent/loop | Prompt file path, relative to the workflow file. |
 | `run` | command | Shell command to run. |
 | `tools` | agent/loop | Comma-separated Pi tools for the nested agent. Defaults to `read,bash,edit,write`. |
@@ -159,7 +155,7 @@ Prompts and command strings support:
 {{ .RunDir }}    # directory for this run
 {{ .CWD }}       # current working directory
 {{ .FlowPath }}  # workflow file path
-{{ .StepName }}  # current step name
+{{ .StepName }}  # current step id, slugified from the step name unless id is set
 ```
 
 ## Built-in example

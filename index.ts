@@ -27,6 +27,8 @@ interface FlowStep {
 }
 
 interface FlowDefinition {
+	name: string;
+	id: string;
 	description?: string;
 	steps: FlowStep[];
 }
@@ -60,6 +62,8 @@ interface ProcessResult {
 
 interface FlowRunState {
 	version: 1;
+	flowName?: string;
+	flowId?: string;
 	flowPath: string;
 	flowHash?: string;
 	task: string;
@@ -70,6 +74,13 @@ interface FlowRunState {
 	status: "running" | "passed" | "failed";
 	git?: { branch?: string; commit?: string };
 	steps: StepSummary[];
+}
+
+class FlowRunError extends Error {
+	constructor(message: string, readonly runDir: string) {
+		super(message);
+		this.name = "FlowRunError";
+	}
 }
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -161,15 +172,25 @@ function unquoteYamlValue(value: string): string {
 	return trimmed;
 }
 
+function slugifyName(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+}
+
 function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 	const steps: FlowStep[] = [];
 	const seen = new Set<string>();
 	let current: Partial<FlowStep> | undefined;
+	let workflowName: string | undefined;
 	let description: string | undefined;
 	let inSteps = false;
 
 	const finish = () => {
 		if (!current) return;
+		if (!current.name && current.label) current.name = slugifyName(current.label);
 		if (!current.name) throw new Error(`${flowPath}: step is missing name`);
 		if (!/^[A-Za-z0-9_-]+$/.test(current.name)) throw new Error(`${flowPath}: invalid step name: ${current.name}`);
 		if (seen.has(current.name)) throw new Error(`${flowPath}: duplicate step name: ${current.name}`);
@@ -194,28 +215,39 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 			inSteps = true;
 			continue;
 		}
+		const nameMatch = line.match(/^name\s*:\s*(.*?)\s*$/);
+		if (nameMatch && !inSteps) {
+			if (workflowName !== undefined) throw new Error(`${flowPath}: duplicate name`);
+			workflowName = unquoteYamlValue(nameMatch[1]);
+			continue;
+		}
 		const descriptionMatch = line.match(/^description\s*:\s*(.*?)\s*$/);
 		if (descriptionMatch && !inSteps) {
 			if (description !== undefined) throw new Error(`${flowPath}: duplicate description`);
 			description = unquoteYamlValue(descriptionMatch[1]);
 			continue;
 		}
-		const stepStart = line.match(/^\s*-\s+name\s*:\s*(.+?)\s*$/);
+		const stepStart = line.match(/^\s*-\s+(agent|command|loop)\s*:\s*(.+?)\s*$/);
 		if (stepStart) {
 			finish();
-			current = { name: unquoteYamlValue(stepStart[1]) };
+			const label = unquoteYamlValue(stepStart[2]);
+			current = { type: stepStart[1] as StepType, label, name: slugifyName(label) };
 			continue;
 		}
-		const prop = line.match(/^\s+(name|type|label|prompt|run|tools|when|expect|until|maxIterations|freeze|timeoutSeconds)\s*:\s*(.+?)\s*$/);
+		const prop = line.match(/^\s+(id|label|prompt|run|tools|when|expect|until|maxIterations|freeze|timeoutSeconds)\s*:\s*(.+?)\s*$/);
 		if (!prop) throw new Error(`${flowPath}: unsupported or malformed line: ${rawLine.trim()}`);
 		if (!current) current = {};
 		const key = prop[1];
 		const value = unquoteYamlValue(prop[2]);
-		(current as any)[key] = key === "timeoutSeconds" || key === "maxIterations" ? Number.parseInt(value, 10) : value;
+		if (key === "id") current.name = slugifyName(value);
+		else (current as any)[key] = key === "timeoutSeconds" || key === "maxIterations" ? Number.parseInt(value, 10) : value;
 	}
 	finish();
+	if (!workflowName?.trim()) throw new Error(`${flowPath}: workflow is missing name`);
+	const workflowId = slugifyName(workflowName);
+	if (!workflowId) throw new Error(`${flowPath}: workflow name must contain at least one letter or number`);
 	if (steps.length === 0) throw new Error(`${flowPath}: no steps found`);
-	return { description, steps };
+	return { name: workflowName, id: workflowId, description, steps };
 }
 
 function renderTemplate(input: string, vars: FlowVars): string {
@@ -484,15 +516,23 @@ async function gitSnapshot(cwd: string, signal?: AbortSignal): Promise<{ branch?
 	};
 }
 
-function summaryMarkdown(data: { flowPath: string; task: string; runId: string; runDir: string; startedAt: string; endedAt: string; status: "passed" | "failed"; steps: StepSummary[] }): string {
+function summaryMarkdown(data: { flowName: string; flowId: string; flowPath: string; task: string; runId: string; runDir: string; startedAt: string; endedAt: string; status: "passed" | "failed"; steps: StepSummary[] }): string {
 	const durationMs = Math.max(0, Date.parse(data.endedAt) - Date.parse(data.startedAt));
-	const lines = [`# Flow Run ${data.status === "passed" ? "✅" : "❌"}`, "", `- status: ${data.status}`, `- flow: \`${data.flowPath}\``, `- run id: \`${data.runId}\``, `- run dir: \`${data.runDir}\``, `- duration: ${Math.round(durationMs / 1000)}s`, "", "## Task", "", data.task, "", "## Steps"];
+	const lines = [`# Flow Run ${data.status === "passed" ? "✅" : "❌"}`, "", `- status: ${data.status}`, `- workflow: ${data.flowName}`, `- workflow id: \`${data.flowId}\``, `- flow: \`${data.flowPath}\``, `- run id: \`${data.runId}\``, `- run dir: \`${data.runDir}\``, `- duration: ${Math.round(durationMs / 1000)}s`, "", "## Task", "", data.task, "", "## Steps"];
 	for (const step of data.steps) {
 		const icon = step.status === "passed" ? "✅" : step.status === "failed" ? "❌" : step.status === "skipped" ? "⏭️" : "◻️";
 		lines.push("", `### ${icon} ${step.label}`, "", `- name: ${step.name}`, `- type: ${step.type}`, `- status: ${step.status}`, `- duration: ${step.durationMs === undefined ? "n/a" : `${Math.round(step.durationMs / 1000)}s`}`, `- detail: ${step.detail || "n/a"}`);
 		if (step.log) lines.push("", "```text", step.log, "```");
 	}
 	return `${lines.join("\n").trim()}\n`;
+}
+
+async function flowSummaryContent(cwd: string, title: string, runDir: string, fallbackFlowPath: string): Promise<string> {
+	try {
+		return await readFile(path.resolve(cwd, runDir, "SUMMARY.md"), "utf8");
+	} catch {
+		return `# ${title}\n\n- Flow: \`${fallbackFlowPath}\`\n- Run: \`${runDir}\`\n- Summary: \`${runDir}/SUMMARY.md\``;
+	}
 }
 
 function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowStep[], initialSteps?: StepSummary[]) {
@@ -609,7 +649,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 	});
 	const ui = createFlowUi(options.ctx, relativeFlowPath, relativeRunDir, flow.steps, steps);
 	const git = await gitSnapshot(options.cwd, options.signal);
-	const runState = (status: FlowRunState["status"], endedAt?: string): FlowRunState => ({ version: 1, flowPath: relativeFlowPath, flowHash, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status, git, steps });
+	const runState = (status: FlowRunState["status"], endedAt?: string): FlowRunState => ({ version: 1, flowName: flow.name, flowId: flow.id, flowPath: relativeFlowPath, flowHash, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status, git, steps });
 
 	await mkdir(absoluteRunDir, { recursive: true });
 	await writeRunState(absoluteRunDir, runState("running"));
@@ -705,7 +745,7 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 
 		const endedAt = new Date().toISOString();
 		await writeRunState(absoluteRunDir, runState("passed", endedAt));
-		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }));
+		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowName: flow.name, flowId: flow.id, flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "passed", steps }));
 		ui.complete("passed", `${relativeRunDir}/SUMMARY.md`);
 		return relativeRunDir;
 	} catch (error) {
@@ -718,13 +758,13 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 		for (let i = currentIndex + 1; i < steps.length; i++) steps[i].status = "skipped";
 		const endedAt = new Date().toISOString();
 		await writeRunState(absoluteRunDir, runState("failed", endedAt));
-		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", steps }));
+		await writeArtifact(absoluteRunDir, "SUMMARY.md", summaryMarkdown({ flowName: flow.name, flowId: flow.id, flowPath: relativeFlowPath, task: options.task, runId: id, runDir: relativeRunDir, startedAt, endedAt, status: "failed", steps }));
 		ui.complete("failed", `${relativeRunDir}/SUMMARY.md`);
-		throw error;
+		throw new FlowRunError(message, relativeRunDir);
 	}
 }
 
-function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; source: "project" | "bundled"; description?: string }> {
+function discoverFlowFiles(cwd: string): Array<{ label: string; id?: string; file: string; source: "project" | "bundled"; description?: string }> {
 	const candidates = [
 		{ dir: path.join(cwd, ".pi", "workflows"), source: "project" as const },
 		// Legacy project locations retained so existing workflows keep working.
@@ -733,7 +773,7 @@ function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; so
 		{ dir: path.join(EXTENSION_DIR, "flows"), source: "bundled" as const },
 	];
 	const seen = new Set<string>();
-	const flows: Array<{ label: string; file: string; source: "project" | "bundled"; description?: string }> = [];
+	const flows: Array<{ label: string; id?: string; file: string; source: "project" | "bundled"; description?: string }> = [];
 	for (const candidate of candidates) {
 		if (!fs.existsSync(candidate.dir)) continue;
 		for (const entry of fs.readdirSync(candidate.dir, { withFileTypes: true })) {
@@ -742,13 +782,18 @@ function discoverFlowFiles(cwd: string): Array<{ label: string; file: string; so
 			if (seen.has(absolute)) continue;
 			seen.add(absolute);
 			const file = relativeForPrompt(cwd, absolute);
+			let label = entry.name.replace(/\.ya?ml$/i, "");
+			let id: string | undefined;
 			let description: string | undefined;
 			try {
-				description = parseFlowYaml(fs.readFileSync(absolute, "utf8"), file).description;
+				const flow = parseFlowYaml(fs.readFileSync(absolute, "utf8"), file);
+				label = flow.name;
+				id = flow.id;
+				description = flow.description;
 			} catch {
 				// Keep /flows useful even when a workflow file is still being edited.
 			}
-			flows.push({ label: entry.name.replace(/\.ya?ml$/i, ""), file, source: candidate.source, description });
+			flows.push({ label, id, file, source: candidate.source, description });
 		}
 	}
 	return flows.sort((a, b) => `${a.source}:${a.label}`.localeCompare(`${b.source}:${b.label}`));
@@ -775,7 +820,7 @@ export default function flowExtension(pi: ExtensionAPI): void {
 			const runs = listRunDirs(ctx.cwd, 5);
 			pi.sendMessage({
 				customType: "flows",
-				content: `# Flows\n\n${flows.length ? flows.map((flow) => `- **${flow.label}** (${flow.source}) — \`${flow.file}\`${flow.description ? `\n  - ${flow.description}` : ""}\n  - run: \`/flow ${flow.file} "your task"\``).join("\n") : "No flows found. Add YAML files under `.pi/workflows/`."}\n\n## Recent runs\n\n${runs.length ? runs.map((run) => `- \`${run}\` — summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs yet."}`,
+				content: `# Flows\n\n${flows.length ? flows.map((flow) => `- **${flow.label}** (${flow.source}) — \`${flow.file}\`${flow.id ? `\n  - id: \`${flow.id}\`` : ""}${flow.description ? `\n  - ${flow.description}` : ""}\n  - run: \`/flow ${flow.file} "your task"\``).join("\n") : "No flows found. Add YAML files under `.pi/workflows/`."}\n\n## Recent runs\n\n${runs.length ? runs.map((run) => `- \`${run}\` — summary: \`${run}/SUMMARY.md\``).join("\n") : "No Flow runs yet."}`,
 				display: true,
 			}, { triggerTurn: false });
 		},
@@ -791,7 +836,8 @@ export default function flowExtension(pi: ExtensionAPI): void {
 					const state = await readRunState(ctx.cwd, resumeMatch[1]);
 					const startAtIndex = resumeStartIndex(state, resumeMatch[2]);
 					const runDir = await runFlow({ cwd: ctx.cwd, flowPath: state.flowPath, task: state.task, signal: ctx.signal, ctx, resume: { runDir: state.runDir, runId: state.runId, startedAt: state.startedAt, steps: state.steps, startAtIndex, expectedFlowHash: state.flowHash } });
-					pi.sendMessage({ customType: "flow-complete", content: `# Flow Resume Complete\n\n- Flow: \`${state.flowPath}\`\n- Run: \`${runDir}\`\n- Resumed from: \`${state.steps[startAtIndex]?.name ?? startAtIndex}\`\n- Summary: \`${runDir}/SUMMARY.md\``, display: true }, { triggerTurn: false });
+					const summary = await flowSummaryContent(ctx.cwd, "Flow Resume Complete", runDir, state.flowPath);
+					pi.sendMessage({ customType: "flow-complete", content: summary, display: true }, { triggerTurn: false });
 					return;
 				}
 
@@ -799,7 +845,8 @@ export default function flowExtension(pi: ExtensionAPI): void {
 				if (rerunMatch) {
 					const state = await readRunState(ctx.cwd, rerunMatch[1]);
 					const runDir = await runFlow({ cwd: ctx.cwd, flowPath: state.flowPath, task: state.task, signal: ctx.signal, ctx });
-					pi.sendMessage({ customType: "flow-complete", content: `# Flow Rerun Complete\n\n- Flow: \`${state.flowPath}\`\n- Run: \`${runDir}\`\n- Summary: \`${runDir}/SUMMARY.md\``, display: true }, { triggerTurn: false });
+					const summary = await flowSummaryContent(ctx.cwd, "Flow Rerun Complete", runDir, state.flowPath);
+					pi.sendMessage({ customType: "flow-complete", content: summary, display: true }, { triggerTurn: false });
 					return;
 				}
 
@@ -810,11 +857,15 @@ export default function flowExtension(pi: ExtensionAPI): void {
 				}
 				const [, flowPath, task] = match;
 				const runDir = await runFlow({ cwd: ctx.cwd, flowPath, task, signal: ctx.signal, ctx });
-				pi.sendMessage({ customType: "flow-complete", content: `# Flow Complete\n\n- Flow: \`${flowPath}\`\n- Run: \`${runDir}\`\n- Summary: \`${runDir}/SUMMARY.md\``, display: true }, { triggerTurn: false });
+				const summary = await flowSummaryContent(ctx.cwd, "Flow Complete", runDir, flowPath);
+				pi.sendMessage({ customType: "flow-complete", content: summary, display: true }, { triggerTurn: false });
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Flow failed: ${message}`, "error");
-				pi.sendMessage({ customType: "flow-error", content: `# Flow Error\n\n${message}`, display: true }, { triggerTurn: false });
+				const content = error instanceof FlowRunError
+					? `${await flowSummaryContent(ctx.cwd, "Flow Error", error.runDir, "")}\n\n## Error\n\n${message}`
+					: `# Flow Error\n\n${message}`;
+				pi.sendMessage({ customType: "flow-error", content, display: true }, { triggerTurn: false });
 			}
 		},
 	});

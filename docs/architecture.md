@@ -63,13 +63,12 @@ A workflow file is YAML.
 Example:
 
 ```yaml
+name: Code Change
 steps:
-  - name: plan
-    type: agent
+  - agent: Plan
     prompt: prompts/PLAN.md
 
-  - name: check_plan
-    type: command
+  - command: Check plan
     run: test -s "{{ .RunDir }}/PLAN.md"
 ```
 
@@ -108,8 +107,7 @@ A command step runs shell code.
 Example:
 
 ```yaml
-- name: check_plan
-  type: command
+- command: Check plan
   run: test -s "{{ .RunDir }}/PLAN.md"
 ```
 
@@ -134,8 +132,7 @@ An agent step launches a focused nested Pi agent.
 Example:
 
 ```yaml
-- name: build
-  type: agent
+- agent: Build
   prompt: prompts/BUILD.md
   tools: read,bash,edit,write
 ```
@@ -152,8 +149,7 @@ The nested agent does **not** get the whole parent chat as its memory. It gets t
 Agent steps that write an artifact should use `expect:` so Flow fails if the file is missing or empty:
 
 ```yaml
-- name: review
-  type: agent
+- agent: Review
   prompt: prompts/REVIEW.md
   expect: REVIEW.md
 ```
@@ -165,8 +161,8 @@ That makes it easier to control.
 A loop step is the safe form of "test, fix, test again". It runs the `until` command first. If the command already passes, the body agent never runs. Otherwise Flow runs the body agent, checks that frozen paths were not modified, and repeats until the gate passes or `maxIterations` is exhausted.
 
 ```yaml
-- name: fix_until_green
-  type: loop
+- loop: Fix until green
+  id: fix_until_green
   prompt: prompts/FIX.md
   until: npm test
   maxIterations: 4
@@ -226,7 +222,7 @@ Flow creates values like:
 {{ .RunID }}
 {{ .RunDir }}
 {{ .FlowPath }}
-{{ .StepName }}
+{{ .StepName }}  # slugified from the step name unless id is set
 ```
 
 These values let each step know where it is and where to write files.

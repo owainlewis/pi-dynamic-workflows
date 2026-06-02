@@ -1,35 +1,28 @@
+name: GitHub Issue Demo
 description: Demonstrate a guarded GitHub issue workflow from planning through optional draft PR creation.
 steps:
-  - name: preflight
-    label: Check GitHub demo preflight
-    type: command
+  - command: Check GitHub demo preflight
     timeoutSeconds: 60
     run: gh auth status >/dev/null || { echo "GitHub CLI is not authenticated. Run: gh auth login" >&2; exit 1; }; git rev-parse --is-inside-work-tree >/dev/null || { echo "Not inside a git repository" >&2; exit 1; }; test -z "$(git status --porcelain)" || { echo "Working tree must be clean before the demo flow. Commit, stash, or reset local changes." >&2; git status --short >&2; exit 1; }; mkdir -p "{{ .RunDir }}" && git branch --show-current > "{{ .RunDir }}/BASE_BRANCH" && gh issue view "{{ .Task }}" --json number,title,url > "{{ .RunDir }}/ISSUE.json" || { echo "Could not read GitHub issue: {{ .Task }}" >&2; exit 1; }
 
-  - name: plan
-    label: Read issue and write plan
-    type: agent
+  - agent: Read issue and write plan
+    id: plan
     tools: read,bash,write
     timeoutSeconds: 600
     prompt: prompts/GITHUB_ISSUE_PLAN.md
     expect: PLAN.md
 
-  - name: create_branch
-    label: Create demo branch
-    type: command
+  - command: Create demo branch
     timeoutSeconds: 60
     run: issue=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).number)' "{{ .RunDir }}/ISSUE.json") && branch="flow-demo/issue-${issue}-{{ .RunID }}" && printf "%s\n" "$branch" > "{{ .RunDir }}/BRANCH" && git switch -c "$branch"
 
-  - name: implement
-    label: Implement planned change
-    type: agent
+  - agent: Implement planned change
     tools: read,bash,edit,write
     timeoutSeconds: 1200
     prompt: prompts/GITHUB_ISSUE_IMPLEMENT.md
 
-  - name: fix_until_green
-    label: Fix until checks pass
-    type: loop
+  - loop: Fix until checks pass
+    id: fix_until_green
     tools: read,bash,edit,write
     timeoutSeconds: 1200
     prompt: prompts/GITHUB_ISSUE_FIX.md
@@ -37,36 +30,26 @@ steps:
     maxIterations: 4
     freeze: "test/ tests/ spec/ specs/ __tests__/"
 
-  - name: review
-    label: Review implementation
-    type: agent
+  - agent: Review implementation
     tools: read,bash,write
     timeoutSeconds: 600
     prompt: prompts/GITHUB_ISSUE_REVIEW.md
     expect: REVIEW.md
 
-  - name: refactor
-    label: Refactor pass
-    type: agent
+  - agent: Refactor pass
     tools: read,bash,edit,write
     timeoutSeconds: 900
     when: grep -q "ISSUE" "{{ .RunDir }}/REVIEW.md"
     prompt: prompts/GITHUB_ISSUE_REFACTOR.md
 
-  - name: final_checks
-    label: Run final checks
-    type: command
+  - command: Run final checks
     timeoutSeconds: 600
     run: if node -e 'const p=require("./package.json"); process.exit(p.scripts&&p.scripts.test?0:1)' 2>/dev/null; then npm test; elif node -e 'const p=require("./package.json"); const d={...p.dependencies,...p.devDependencies}; process.exit(d.typescript?0:1)' 2>/dev/null; then npm exec -- tsc --noEmit; else git diff --check; fi
 
-  - name: open_draft_pr
-    label: Open draft PR when allowed
-    type: command
+  - command: Open draft PR when allowed
     timeoutSeconds: 180
     run: test "${FLOW_DEMO_ALLOW_PUSH:-}" = "1" || { echo "Set FLOW_DEMO_ALLOW_PUSH=1 to push and open a draft PR" > "{{ .RunDir }}/PR_SKIPPED"; exit 0; }; branch=$(cat "{{ .RunDir }}/BRANCH") && base=$(cat "{{ .RunDir }}/BASE_BRANCH") && git push -u origin "$branch" && gh pr create --draft --base "$base" --title "Demo issue workflow for {{ .Task }}" --body-file "{{ .RunDir }}/PR_BODY.md" > "{{ .RunDir }}/PR_URL"
 
-  - name: update_issue
-    label: Update issue when allowed
-    type: command
+  - command: Update issue when allowed
     timeoutSeconds: 120
     run: test "${FLOW_DEMO_UPDATE_ISSUE:-}" = "1" || { echo "Set FLOW_DEMO_UPDATE_ISSUE=1 to comment on the issue" > "{{ .RunDir }}/ISSUE_UPDATE_SKIPPED"; exit 0; }; if test -s "{{ .RunDir }}/PR_URL"; then gh issue comment "{{ .Task }}" --body "Flow demo opened draft PR: $(cat "{{ .RunDir }}/PR_URL")"; else gh issue comment "{{ .Task }}" --body "Flow demo completed locally. Push/PR creation was skipped."; fi
