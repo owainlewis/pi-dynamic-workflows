@@ -665,6 +665,8 @@ async function runParallelStep(options: {
 	runId: string;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
+	onChildren?: (children: Array<{ label: string; status: StepStatus; detail?: string }>) => void;
+	onChild?: (index: number, status: StepStatus, detail?: string) => void;
 }): Promise<{ detail: string; log: string }> {
 	const step = options.step;
 	const promptPath = path.resolve(path.dirname(options.absoluteFlowPath), step.agent!.prompt!);
@@ -677,8 +679,10 @@ async function runParallelStep(options: {
 		const childRunDir = path.join(options.absoluteRunDir, step.name, itemSlug);
 		return { item, itemIndex, itemSlug, childRunDir };
 	});
+	options.onChildren?.(children.map((child) => ({ label: child.item, status: "pending" as StepStatus })));
 
 	const results = await Promise.allSettled(children.map(async (child) => {
+		options.onChild?.(child.itemIndex, "running", "starting");
 		await mkdir(child.childRunDir, { recursive: true });
 		const logs: string[] = [`item: ${child.item}`, `childRunDir: ${child.childRunDir}`];
 		let cwd = options.cwd;
@@ -700,13 +704,20 @@ async function runParallelStep(options: {
 			tools,
 			timeoutSeconds,
 			signal: options.signal,
-			onProgress: (message) => options.onProgress?.(`child ${child.itemIndex + 1}/${children.length}: ${message}`),
+			onProgress: (message) => {
+				options.onProgress?.(`child ${child.itemIndex + 1}/${children.length}: ${message}`);
+				options.onChild?.(child.itemIndex, "running", message);
+			},
 		});
 		await writeArtifact(child.childRunDir, "OUTPUT.md", output.trim() || "Agent completed without a final text response.");
 		if (step.agent!.expect) assertExpectedArtifact(child.childRunDir, renderTemplate(step.agent!.expect, vars));
 		if (worktreeDir) logs.push("", await captureChildWorktree(child.childRunDir, worktreeDir, DEFAULT_COMMAND_TIMEOUT_SECONDS, options.signal));
+		options.onChild?.(child.itemIndex, "passed", step.agent!.expect ? `found ${step.agent!.expect}` : "done");
 		return { child, output, log: logs.join("\n") };
 	}));
+	for (const [index, result] of results.entries()) {
+		if (result.status === "rejected") options.onChild?.(index, "failed", result.reason instanceof Error ? result.reason.message : String(result.reason));
+	}
 
 	const failures = results
 		.map((result, index) => ({ result, child: children[index] }))
@@ -752,6 +763,7 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		detail: initialSteps?.[index]?.detail ?? "",
 		startedAt: 0,
 		endedAt: initialSteps?.[index]?.status === "passed" || initialSteps?.[index]?.status === "failed" || initialSteps?.[index]?.status === "skipped" ? Date.now() : 0,
+		children: [] as Array<{ label: string; status: StepStatus; detail: string; startedAt: number; endedAt: number }>,
 	}));
 	const startedAt = Date.now();
 	let activeIndex = 0;
@@ -784,6 +796,20 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 		const text = `${color(icon(step.status), tone)} ${label}${state ? color(`  ${state}`, ANSI.dim) : ""}`;
 		return truncateToWidth(` ${text}`, width);
 	};
+	const childTone = (child: typeof statuses[number]["children"][number]) => child.status === "pending" ? ANSI.gray : statusColor(child.status);
+	const lineForChild = (child: typeof statuses[number]["children"][number], width: number): string => {
+		const tone = childTone(child);
+		const state = child.status === "pending" ? "" : child.status === "passed" ? "done" : child.status === "running" ? cleanDetail(child.detail) || "running" : cleanDetail(child.detail) || child.status;
+		const text = `${color(icon(child.status), tone)} ${color(child.label, tone)}${state ? color(`  ${truncate(state, 70)}`, ANSI.dim) : ""}`;
+		return truncateToWidth(`   ${text}`, width);
+	};
+	const stepLines = (width: number): string[] => statuses.flatMap((step) => {
+		const lines = [lineForStep(step, width)];
+		if (step.children.length && (step.status === "running" || step.status === "failed" || step.status === "passed")) {
+			for (const child of step.children) lines.push(lineForChild(child, width));
+		}
+		return lines;
+	});
 	const render = (active: string) => {
 		if (!ctx.hasUI) return;
 		activeText = cleanDetail(active) || activeText;
@@ -798,7 +824,7 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 					`${color("Flow", ANSI.softGreen + ANSI.bold)} ${color(statusWord(), finalState === "failed" ? ANSI.red : finalState === "passed" ? ANSI.green : ANSI.cyan)} ${color("·", ANSI.gray)} ${name} ${color("·", ANSI.gray)} ${completedCount()}/${statuses.length}`,
 					` ${progressDots()}`,
 					"",
-					...statuses.map((step) => lineForStep(step, width)),
+					...stepLines(width),
 					"",
 					` ${color(activeText, finalState === "failed" ? ANSI.red : ANSI.dim)}`,
 					` ${color(footer, ANSI.gray)}`,
@@ -825,6 +851,27 @@ function createFlowUi(ctx: any, flowPath: string, runDir: string, steps: FlowSte
 			activeIndex = index;
 			statuses[index].detail = cleanDetail(detail);
 			render(statuses[index].detail || detail);
+		},
+		children(index: number, children: Array<{ label: string; status: StepStatus; detail?: string }>) {
+			activeIndex = index;
+			statuses[index].children = children.map((child) => ({
+				label: child.label,
+				status: child.status,
+				detail: cleanDetail(child.detail ?? ""),
+				startedAt: child.status === "running" ? Date.now() : 0,
+				endedAt: child.status === "passed" || child.status === "failed" || child.status === "skipped" ? Date.now() : 0,
+			}));
+			render(`${children.length} parallel job${children.length === 1 ? "" : "s"}`);
+		},
+		child(index: number, childIndex: number, status: StepStatus, detail = "") {
+			activeIndex = index;
+			const child = statuses[index].children[childIndex];
+			if (!child) return;
+			child.status = status;
+			child.detail = cleanDetail(detail);
+			if (status === "running" && !child.startedAt) child.startedAt = Date.now();
+			if (status === "passed" || status === "failed" || status === "skipped") child.endedAt = Date.now();
+			render(`${child.label}: ${child.detail || status}`);
 		},
 		complete(status: "passed" | "failed", active: string) {
 			finalState = status;
@@ -955,6 +1002,8 @@ async function runFlow(options: { cwd: string; flowPath: string; task: string; s
 					runId: id,
 					signal: options.signal,
 					onProgress: (message) => ui.detail(i, message),
+					onChildren: (children) => ui.children(i, children),
+					onChild: (childIndex, status, detail) => ui.child(i, childIndex, status, detail),
 				});
 				steps[i].log = result.log;
 				steps[i].durationMs = Date.now() - stepStartedAt;

@@ -60,6 +60,7 @@ A workflow is a YAML file with ordered steps. Each step is one of:
 - `parallel` — a fan-out of nested Pi agents over a simple `foreach` list
 
 Flow shows each run live in Pi's UI and writes one simple `SUMMARY.md` for every run.
+Parallel steps expand in the progress panel with one child row per `foreach` item.
 
 Project workflows live in `.pi/workflows/<flow-name>.yaml`.
 

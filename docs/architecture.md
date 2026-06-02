@@ -213,6 +213,7 @@ Each child gets the normal workflow variables plus:
 Child prompts should write artifacts to `{{ .ChildRunDir }}`. If `worktree: true`, Flow creates a separate git worktree and branch for each item, then records `PATCH.diff` and `STATUS.txt` in the child run directory.
 
 The next step is usually a normal agent that reads the child reports and combines the results.
+While the parallel step is running, Flow shows one progress row per child item in the Pi panel.
 
 ### 8. Dynamic workflow authoring
 
