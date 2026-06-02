@@ -113,6 +113,15 @@ Example:
   run: test -s "{{ .RunDir }}/PLAN.md"
 ```
 
+Commands can also use a multiline YAML block:
+
+```yaml
+- command: Write report
+  run: |
+    set -eu
+    printf "done\n" > "{{ .RunDir }}/REPORT.md"
+```
+
 Command steps are useful for hard checks.
 
 They are good for things like:

@@ -221,6 +221,7 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 	let inSteps = false;
 	let inForeach = false;
 	let inParallelAgent = false;
+	let block: { key: string; target: any; indent: number; contentIndent?: number; lines: string[] } | undefined;
 
 	const finish = () => {
 		if (!current) return;
@@ -247,7 +248,26 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 		steps.push(current as FlowStep);
 	};
 
+	const finishBlock = () => {
+		if (!block) return;
+		block.target[block.key] = block.lines.join("\n").replace(/\s+$/g, "");
+		block = undefined;
+	};
+
 	for (const rawLine of text.split(/\r?\n/)) {
+		if (block) {
+			if (!rawLine.trim()) {
+				block.lines.push("");
+				continue;
+			}
+			const indent = rawLine.match(/^\s*/)?.[0].length ?? 0;
+			if (indent > block.indent) {
+				block.contentIndent ??= indent;
+				block.lines.push(rawLine.slice(Math.min(indent, block.contentIndent)));
+				continue;
+			}
+			finishBlock();
+		}
 		const line = stripYamlComment(rawLine);
 		if (!line.trim()) continue;
 		if (/^\s*steps\s*:\s*$/.test(line)) {
@@ -268,6 +288,7 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 		}
 		const stepStart = line.match(/^\s*-\s+(agent|command|loop|parallel)\s*:\s*(.+?)\s*$/);
 		if (stepStart) {
+			finishBlock();
 			finish();
 			inForeach = false;
 			inParallelAgent = false;
@@ -289,7 +310,8 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 				if (!current?.agent) current!.agent = {};
 				const key = agentProp[1];
 				const value = unquoteYamlValue(agentProp[2]);
-				(current!.agent as any)[key] = key === "timeoutSeconds" ? Number.parseInt(value, 10) : value;
+				if (value === "|" || value === ">") block = { key, target: current!.agent, indent: rawLine.match(/^\s*/)?.[0].length ?? 0, lines: [] };
+				else (current!.agent as any)[key] = key === "timeoutSeconds" ? Number.parseInt(value, 10) : value;
 				continue;
 			}
 			inParallelAgent = false;
@@ -315,8 +337,10 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 		const value = unquoteYamlValue(prop[2]);
 		if (key === "id") current.name = slugifyName(value);
 		else if (key === "worktree") current.worktree = value === "true";
+		else if (value === "|" || value === ">") block = { key, target: current, indent: rawLine.match(/^\s*/)?.[0].length ?? 0, lines: [] };
 		else (current as any)[key] = key === "timeoutSeconds" || key === "maxIterations" ? Number.parseInt(value, 10) : value;
 	}
+	finishBlock();
 	finish();
 	if (!workflowName?.trim()) throw new Error(`${flowPath}: workflow is missing name`);
 	const workflowId = slugifyName(workflowName);

@@ -97,6 +97,20 @@ Expected:
 - `.pi/flow/runs/<run-id>/SUMMARY.md` exists
 - `SUMMARY.md` records both command steps
 
+## Multiline command flow, no model required
+
+```yaml
+name: Multiline command smoke
+steps:
+  - command: Write report
+    run: |
+      set -eu
+      mkdir -p "{{ .RunDir }}"
+      printf "# Multiline smoke\n" > "{{ .RunDir }}/REPORT.md"
+```
+
+Expected: `SUMMARY.md` records the command as passed and `REPORT.md` exists.
+
 ## Conditional and already-satisfied loop path, no model required
 
 Use a disposable git repo and a workflow where `when` skips one command and `loop.until` passes before the agent body or prompt file is used.

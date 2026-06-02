@@ -151,6 +151,16 @@ Supported step fields:
 | `worktree` | parallel | `true` to create an isolated git worktree and branch for each child. Defaults to `false`. |
 | `timeoutSeconds` | no | Per-step timeout. Commands default to 120s. Agents default to 900s. |
 
+Command-like fields can be single-line strings or YAML block scalars:
+
+```yaml
+  - command: Write report
+    run: |
+      set -eu
+      mkdir -p "{{ .RunDir }}"
+      printf "done\n" > "{{ .RunDir }}/REPORT.md"
+```
+
 Parallel steps have one nested `agent:` body:
 
 ```yaml
