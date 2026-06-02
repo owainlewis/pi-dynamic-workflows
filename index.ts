@@ -31,7 +31,6 @@ interface FlowStep {
 	maxIterations?: number;
 	freeze?: string;
 	foreach?: string[];
-	foreachVar?: string;
 	worktree?: boolean;
 	agent?: ParallelAgent;
 	timeoutSeconds?: number;
@@ -282,14 +281,6 @@ function parseFlowYaml(text: string, flowPath: string): FlowDefinition {
 				current?.foreach?.push(unquoteYamlValue(item[1]));
 				continue;
 			}
-			const foreachVar = line.match(/^\s+var\s*:\s*(.+?)\s*$/);
-			if (foreachVar) {
-				const value = unquoteYamlValue(foreachVar[1]);
-				if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error(`${flowPath}: foreach var must be a template-safe identifier`);
-				current!.foreachVar = value;
-				continue;
-			}
-			if (/^\s+(in|items)\s*:\s*$/.test(line)) continue;
 			inForeach = false;
 		}
 		if (inParallelAgent) {
@@ -677,7 +668,6 @@ async function runParallelStep(options: {
 			logs.push(`branch: ${branchName}`, "", worktree.log);
 		}
 		const vars = childVars(options.parentVars, child.item, child.itemIndex, child.itemSlug, child.childRunDir, worktreeDir, branchName);
-		if (step.foreachVar) vars[step.foreachVar] = child.item;
 		const prompt = renderTemplate(promptTemplate, vars);
 		options.onProgress?.(`child ${child.itemIndex + 1}/${children.length}: ${child.item}`);
 		const output = await runAgent({
@@ -1093,19 +1083,9 @@ Runtime rules:
 - Top-level \`name\` is required.
 - Each step starts with exactly one of \`agent:\`, \`command:\`, \`loop:\`, or \`parallel:\`.
 - Agent and loop prompt paths are relative to the workflow file.
-- Prefer \`foreach:\` as a simple YAML list of scalar items.
-- If a named item variable helps readability, use \`foreach: { var/in }\` style:
-
-\`\`\`yaml
-foreach:
-  var: File
-  in:
-    - README.md
-    - index.ts
-\`\`\`
-
+- \`foreach:\` must be a simple YAML list of scalar items.
 - A parallel step has one nested \`agent:\` body.
-- Parallel children get \`{{ .Item }}\`, \`{{ .ItemIndex }}\`, \`{{ .ItemSlug }}\`, \`{{ .ChildRunDir }}\`, any named foreach variable such as \`{{ .File }}\`, and, when \`worktree: true\`, \`{{ .WorktreeDir }}\` and \`{{ .BranchName }}\`.
+- Parallel children get \`{{ .Item }}\`, \`{{ .ItemIndex }}\`, \`{{ .ItemSlug }}\`, \`{{ .ChildRunDir }}\`, and, when \`worktree: true\`, \`{{ .WorktreeDir }}\` and \`{{ .BranchName }}\`.
 - Parallel child prompts should write outputs under \`{{ .ChildRunDir }}\`.
 - If \`worktree: true\`, code edits happen in the child worktree; Flow records \`PATCH.diff\` and \`STATUS.txt\` under the child run dir.
 - Keep examples safe by default: no commits, pushes, destructive deletes, or network-dependent behavior unless the user explicitly requested them.

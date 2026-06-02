@@ -205,21 +205,6 @@ Child prompts should write artifacts to `{{ .ChildRunDir }}`. If `worktree: true
 
 The next step is usually a normal agent that reads the child reports and combines the results.
 
-For readability, a workflow can name the item variable:
-
-```yaml
-- parallel: Review files
-  foreach:
-    var: File
-    in:
-      - README.md
-      - index.ts
-  agent:
-    prompt: prompts/REVIEW_FILE.md
-```
-
-That makes both `{{ .Item }}` and `{{ .File }}` available to the child prompt.
-
 ### 8. Dynamic workflow authoring
 
 `/flow-new` is the authoring layer. You describe the process in plain language, and a Pi agent writes concrete workflow YAML plus prompt files under `.pi/workflows/`.

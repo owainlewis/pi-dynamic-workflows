@@ -173,21 +173,6 @@ steps:
 
 Each child writes artifacts under its own child run directory. With `worktree: true`, Flow also records each child's `PATCH.diff` and `STATUS.txt` for the coordinator step.
 
-If a named item variable reads better, `foreach` can also use `var` and `in`:
-
-```yaml
-  - parallel: Review files
-    foreach:
-      var: File
-      in:
-        - README.md
-        - index.ts
-    agent:
-      prompt: prompts/review-file.md
-```
-
-That makes `{{ .File }}` available in the child prompt. `{{ .Item }}` is always available too.
-
 ## Template variables
 
 Prompts and command strings support:
@@ -208,7 +193,6 @@ Parallel child prompts also support:
 {{ .Item }}            # foreach item value
 {{ .ItemIndex }}       # zero-based foreach index
 {{ .ItemSlug }}        # slugified item value
-{{ .File }}            # named foreach variable when var: File is set
 {{ .ChildRunDir }}     # child artifact directory
 {{ .WorktreeDir }}     # child git worktree when worktree: true
 {{ .BranchName }}      # child branch when worktree: true
